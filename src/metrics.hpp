@@ -74,6 +74,7 @@ public:
     void setState(int channel, int state, int sliceMode, int fallback);
     void setRoute(int channel, std::string const& label, std::string const& domain, std::string const& flow, std::string const& outputFlow,
         std::string const& warning, int width, int height, int rateNum, int rateDen, bool interlaced);
+    void observeLatency(int channel, double seconds);
     void addGrain(int channel, bool bypass, std::uint64_t clipped, std::uint64_t samples, double latency, double processing, double now);
     void addLate(int channel, std::uint64_t count);
     void addSettingsChange(int channel);

@@ -14,7 +14,7 @@ Pinned MXL: `dmf-mxl/mxl` `release/v1.1` at `218ddaa0a08c12ffe75fc475ae65aa3d9ee
 
 * **Read offset.** Slice mode follows the writer's head (offset 0). Whole-grain mode reads `CC_READ_OFFSET_GRAINS` behind the head, default 1, so the grain is complete. Fallback reasons are `interlaced`, `no_slice_commits` (four grains seen only as complete) and `slice_layout` (slice size is not an integer number of v210 lines that divide the frame). The change is logged once.
 
-* **Added latency.** The histogram is the time from `mxlFlowReaderGetGrainSlice` returning (the slice is visible to this process) until `mxlFlowWriterCommitGrain` returns. It does not include the writer's own timestamp.
+* **Added latency.** The histogram is the time from the slice becoming visible (`mxlFlowReaderGetGrainSlice` has returned) until `mxlFlowWriterCommitGrain` returns for the lines just written. A later slice does not reprocess lines already committed. The wait for the source to publish the next slice is not included.
 
 * **NMOS.** The node is an in-process IS-04 v1.3 and IS-05 v1.1 implementation with BCP-007-03 `video/v210` and `urn:x-nmos:transport:mxl`, deterministic UUIDv5 ids, and static registry registration. `NMOS_DNS_SD=true` is accepted and logged; this build does not advertise over DNS-SD. Receivers activate even when the domain or flow is missing (`waiting`, backoff to 2 s) and the IS-04 `subscription` follows the activation. A new input geometry mints a new output flow id.
 

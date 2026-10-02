@@ -115,6 +115,13 @@ void RuntimeBoard::setRoute(int channel, std::string const& label, std::string c
     row.interlaced = interlaced;
 }
 
+void RuntimeBoard::observeLatency(int channel, double seconds)
+{
+    std::lock_guard lock(mu_);
+    if (channel < 1 || channel > static_cast<int>(channels_.size())) return;
+    channels_[static_cast<std::size_t>(channel - 1)].latency.observe(seconds);
+}
+
 void RuntimeBoard::addGrain(int channel, bool bypass, std::uint64_t clipped, std::uint64_t samples, double latency, double processing, double now)
 {
     std::lock_guard lock(mu_);

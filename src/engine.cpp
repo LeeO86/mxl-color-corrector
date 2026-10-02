@@ -242,6 +242,7 @@ struct Engine::Impl
         FallbackReason logged = FallbackReason::None;
         bool outOpen = false;
         std::uint16_t produced = 0;
+        double grainCpu = 0;
         mxlGrainInfo outInfo{};
         std::uint8_t* outPayload = nullptr;
         double previewDue = 0;
@@ -400,6 +401,7 @@ struct Engine::Impl
                     mxlFlowWriterCancelGrain(writer);
                     outOpen = false;
                     produced = 0;
+                    grainCpu = 0;
                 }
                 logInfo("channel " + std::to_string(channel) + " mode " + (decision.slice ? "slice" : std::string("whole-grain:") + fallbackName(decision.reason)));
                 logged = decision.reason;
@@ -440,7 +442,8 @@ struct Engine::Impl
 
             auto matrix = store.matrix(channel);
             int const linesPerSlice = sliceBytes > 0 && lineBytes > 0 ? static_cast<int>(sliceBytes / static_cast<std::uint32_t>(lineBytes)) : 1;
-            auto finishGrain = [&](std::uint8_t const* input, mxlGrainInfo const& grain, int row0, int row1, double waited) {
+            auto finishGrain = [&](std::uint8_t const* input, mxlGrainInfo const& grain, int row0, int row1) {
+                auto t0 = monoNow();
                 if (!outOpen)
                 {
                     auto opened = mxlFlowWriterOpenGrain(writer, index, &outInfo, &outPayload);
@@ -451,7 +454,6 @@ struct Engine::Impl
                     outOpen = true;
                     produced = 0;
                 }
-                auto t0 = monoNow();
                 ProcessStats stats;
                 bool invalid = (grain.flags & MXL_GRAIN_FLAG_INVALID) != 0;
                 if (invalid)
@@ -472,9 +474,17 @@ struct Engine::Impl
                 auto t1 = monoNow();
                 if (lines >= outInfo.totalSlices) outOpen = false;
                 if (committed != MXL_STATUS_OK) return false;
-                if (lines >= outInfo.totalSlices || invalid)
+                double const sliceSeconds = t1 - t0;
+                grainCpu += sliceSeconds;
+                bool const done = lines >= outInfo.totalSlices || invalid;
+                if (!done)
                 {
-                    runtime.addGrain(channel, matrix.bypass, stats.clipped, stats.samples == 0 ? 1 : stats.samples, t1 - waited, t1 - t0, t1);
+                    runtime.observeLatency(channel, sliceSeconds);
+                }
+                if (done)
+                {
+                    runtime.addGrain(channel, matrix.bypass, stats.clipped, stats.samples == 0 ? 1 : stats.samples, sliceSeconds, grainCpu, t1);
+                    grainCpu = 0;
                     if (t1 >= previewDue && input && outPayload)
                     {
                         runtime.setPreview(channel, encodePreviewJpeg(input, current.width, current.height, lineBytes),
@@ -490,7 +500,6 @@ struct Engine::Impl
                 std::uint16_t want = static_cast<std::uint16_t>(std::max(1, produced + 1));
                 mxlGrainInfo grain{};
                 std::uint8_t* payload = nullptr;
-                auto waited = monoNow();
                 auto status = mxlFlowReaderGetGrainSlice(reader, index, want, 2000000, &grain, &payload);
                 if (status == MXL_ERR_OUT_OF_RANGE_TOO_EARLY || status == MXL_ERR_TIMEOUT || status == MXL_ERR_NOT_READY)
                 {
@@ -503,6 +512,7 @@ struct Engine::Impl
                     {
                         mxlFlowWriterCancelGrain(writer);
                         outOpen = false;
+                        grainCpu = 0;
                     }
                     synced = false;
                     continue;
@@ -518,7 +528,8 @@ struct Engine::Impl
                 int const already = static_cast<int>(produced) * std::max(linesPerSlice, 1);
                 if ((grain.flags & MXL_GRAIN_FLAG_INVALID) != 0 || rows >= current.height || grain.validSlices >= grain.totalSlices)
                 {
-                    if (!finishGrain(payload, grain, 0, current.height, waited))
+                    int const from = (grain.flags & MXL_GRAIN_FLAG_INVALID) != 0 ? 0 : already;
+                    if (!finishGrain(payload, grain, from, current.height))
                     {
                         closeReader();
                         continue;
@@ -528,7 +539,7 @@ struct Engine::Impl
                 }
                 else if (rows > already)
                 {
-                    if (!finishGrain(payload, grain, already, rows, waited))
+                    if (!finishGrain(payload, grain, already, rows))
                     {
                         closeReader();
                         continue;
@@ -540,7 +551,6 @@ struct Engine::Impl
             {
                 mxlGrainInfo grain{};
                 std::uint8_t* payload = nullptr;
-                auto waited = monoNow();
                 auto status = mxlFlowReaderGetGrain(reader, index, 5000000, &grain, &payload);
                 if (status == MXL_ERR_OUT_OF_RANGE_TOO_EARLY || status == MXL_ERR_TIMEOUT || status == MXL_ERR_NOT_READY)
                 {
@@ -557,7 +567,7 @@ struct Engine::Impl
                     closeReader();
                     continue;
                 }
-                if (!finishGrain(payload, grain, 0, current.height, waited))
+                if (!finishGrain(payload, grain, 0, current.height))
                 {
                     closeReader();
                     continue;
