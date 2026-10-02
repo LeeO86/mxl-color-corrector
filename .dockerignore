@@ -1,0 +1,4 @@
+build
+.git
+web/node_modules
+**/CMakeFiles
