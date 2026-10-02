@@ -1,0 +1,8 @@
+build/
+cmake-build-*/
+web/node_modules/
+web/dist/
+.cache/
+*.o
+compile_commands.json
+.vscode/

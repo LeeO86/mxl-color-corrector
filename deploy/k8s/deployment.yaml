@@ -1,0 +1,89 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mxl-color-corrector
+  labels:
+    app: mxl-color-corrector
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mxl-color-corrector
+  template:
+    metadata:
+      labels:
+        app: mxl-color-corrector
+        io.dmf.mxl.revision: "218ddaa0a08c12ffe75fc475ae65aa3d9eef16d7"
+    spec:
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      containers:
+        - name: corrector
+          image: ghcr.io/leeo86/mxl-color-corrector:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: web
+              containerPort: 8140
+            - name: nmos
+              containerPort: 3292
+          env:
+            - name: CC_CHANNELS
+              value: "2"
+            - name: MXL_DOMAIN_SCAN_PATH
+              value: /Volumes/mxl
+            - name: MXL_OUTPUT_DOMAIN_DIR
+              value: /Volumes/mxl/cc
+            - name: NMOS_DNS_SD
+              value: "false"
+            - name: WEB_PORT
+              value: "8140"
+            - name: NMOS_PORT
+              value: "3292"
+            - name: CC_STATE_DIR
+              value: /config
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: web
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: web
+          resources:
+            # One 1080p50 channel is a fraction of a core without RGB clip.
+            # Request one core per channel and double it when RGB gamut clip is on.
+            requests:
+              cpu: "2"
+              memory: 1Gi
+            limits:
+              cpu: "4"
+              memory: 4Gi
+          volumeMounts:
+            - name: mxl
+              mountPath: /Volumes/mxl
+            - name: config
+              mountPath: /config
+      volumes:
+        - name: mxl
+          hostPath:
+            path: /Volumes/mxl
+            type: DirectoryOrCreate
+        - name: config
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mxl-color-corrector
+spec:
+  selector:
+    app: mxl-color-corrector
+  ports:
+    - name: web
+      port: 8140
+      targetPort: web
+    - name: nmos
+      port: 3292
+      targetPort: nmos
