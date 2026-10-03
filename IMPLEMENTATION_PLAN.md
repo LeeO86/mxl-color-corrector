@@ -45,4 +45,4 @@ Pinned MXL: `dmf-mxl/mxl` `release/v1.1` at `218ddaa0a08c12ffe75fc475ae65aa3d9ee
 
 * **History.** Output domains are created with a 200 ms grain history so a 1080p50 flow stays near 60 MB.
 
-Performance figures are in [docs/performance.md](docs/performance.md). They were measured on the build machine, not on a Dell Precision 3930.
+Performance figures are in [docs/performance.md](docs/performance.md). They were measured on the build machine, not on a Dell Precision 3930. A lab run on a Xeon Gold 6136 (2026-10-03, `docs/performance.md`) reached only about 37 grains/s per 1080p50 channel at one core.
