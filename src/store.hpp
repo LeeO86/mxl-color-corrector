@@ -56,6 +56,8 @@ public:
     bool deletePreset(int channel, std::string const& name, std::string& error);
     [[nodiscard]] Json exportPresets() const;
     bool importPresets(Json const& doc, std::string& error);
+    [[nodiscard]] Json exportBundle() const;
+    bool importBundle(Json const& doc, std::string& error);
 
     void setListener(std::function<void(int channel)> listener);
     [[nodiscard]] std::string statePath() const;

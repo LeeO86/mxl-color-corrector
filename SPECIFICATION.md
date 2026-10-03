@@ -217,12 +217,29 @@ Env > JSON file (`CC_CONFIG_FILE`) > defaults; invalid configuration exits 78.
 | --- | --- |
 | `CC_CHANNELS` | 2 (max 16) |
 | `MXL_DOMAIN_SCAN_PATH` | `/Volumes/mxl` |
-| `MXL_OUTPUT_DOMAIN_DIR` / `MXL_OUTPUT_DOMAIN_ID` | `/Volumes/mxl/cc-<seed-short>` / derived |
+| `MXL_OUTPUT_DOMAIN_DIR` / `MXL_OUTPUT_DOMAIN_ID` | `/Volumes/mxl/cc-<seed-short>` / UUIDv5 of `NMOS_SEED` |
+| `MXL_HISTORY_DURATION_NS` | `200000000` |
+| `MXL_CLEANUP_ON_EXIT` | `false` |
 | `CC_CLIP` | `legal` |
 | `CC_RGB_CLIP` | `off` |
 | `CC_READ_OFFSET_GRAINS` | 0 in slice mode (follow the writer), 1 in whole-grain mode |
-| `NMOS_REGISTRY_ADDRESS` / `_PORT`, `NMOS_DNS_SD`, `NMOS_PORT`, `NMOS_SEED` | empty / 3210, false, 3292, `HOST_ID-cc` |
+| `NMOS_REGISTRY_ADDRESS` / `NMOS_REGISTRY_PORT` | empty / 3210 |
+| `NMOS_QUERY_ADDRESS` / `NMOS_QUERY_PORT` | registry address / registry port + 1 |
+| `NMOS_DNS_SD` | `false` (no browse and no mDNS; this build has neither) |
+| `NMOS_PORT` | 3292 (node and connection APIs; no listener on `NMOS_PORT+1`) |
+| `NMOS_SEED` | `HOST_ID-cc` when `HOST_ID` is set, otherwise `<hostname>-cc` |
+| `NMOS_LABEL` | `HOST_ID` when that is set, otherwise `MXL Color Corrector` |
+| `NMOS_TAGS` | empty JSON object |
+| `NMOS_HOST_ADDRESS` | first non-loopback IPv4; `HOST_ID` is an alias when it is an IP literal |
 | `WEB_PORT` | 8140 |
+| `CC_STATE_DIR` | `/config` |
+| `CC_PREVIEW_FPS` | 4 |
+| `SHUTDOWN_TIMEOUT_S` | 10 |
+| `CC_LOG_LEVEL` | `info` |
+| `CC_CONFIG_FILE` | unset |
+| `HOST_ID` | hostname; label alias, and address alias only when it is an IP literal |
+
+`/readyz` is 200 when the process is serving and, if `NMOS_REGISTRY_ADDRESS` is set, the node is visible on the Query API. `/livez` is process liveness. SIGTERM deregisters the node, releases MXL readers and writers, removes the output domain when `MXL_CLEANUP_ON_EXIT=true`, and exits 143. `GET/POST /api/v1/config/export` and `/import` round-trip channels, presets and IS-05 routes. There are no secrets in this function.
 
 ---
 

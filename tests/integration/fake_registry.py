@@ -5,22 +5,50 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
 class Handler(BaseHTTPRequestHandler):
-    def _ok(self):
-        body = b'{"health":"ok"}'
-        self.send_response(200)
+    nodes = {}
+
+    def _send(self, code, body):
+        data = body if isinstance(body, bytes) else body.encode()
+        self.send_response(code)
         self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Content-Length", str(len(data)))
         self.end_headers()
-        self.wfile.write(body)
+        if code != 204:
+            self.wfile.write(data)
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length", "0") or 0)
-        if length:
-            self.rfile.read(length)
-        self._ok()
+        raw = self.rfile.read(length) if length else b""
+        if self.path.startswith("/x-nmos/registration/v1.3/resource"):
+            try:
+                import json
+                doc = json.loads(raw.decode() or "{}")
+                if doc.get("type") == "node":
+                    Handler.nodes[doc["data"]["id"]] = doc["data"]
+            except Exception:
+                pass
+        self._send(200, b'{"health":"ok"}')
 
     def do_GET(self):
-        self._ok()
+        prefix = "/x-nmos/query/v1.3/nodes/"
+        if self.path.startswith(prefix):
+            import json
+            node_id = self.path[len(prefix):].strip("/")
+            if node_id in Handler.nodes:
+                self._send(200, json.dumps(Handler.nodes[node_id]))
+                return
+            self._send(404, b'{"error":"missing"}')
+            return
+        self._send(200, b'{"health":"ok"}')
+
+    def do_DELETE(self):
+        marker = "/resource/nodes/"
+        if marker in self.path:
+            node_id = self.path.split(marker, 1)[1].strip("/")
+            Handler.nodes.pop(node_id, None)
+            self._send(204, b"")
+            return
+        self._send(404, b"{}")
 
     def log_message(self, fmt, *args):
         return

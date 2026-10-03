@@ -4,11 +4,16 @@
 #include "util/uuid.hpp"
 
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <netdb.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <cerrno>
 #include <chrono>
+#include <filesystem>
+#include <fstream>
 #include <sstream>
 
 namespace cc
@@ -39,13 +44,38 @@ std::string httpExchange(std::string const& host, int port, std::string const& m
         freeaddrinfo(res);
         return {};
     }
-    if (::connect(fd, res->ai_addr, res->ai_addrlen) != 0)
+    int flags = ::fcntl(fd, F_GETFL, 0);
+    ::fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+    int rc = ::connect(fd, res->ai_addr, res->ai_addrlen);
+    freeaddrinfo(res);
+    if (rc != 0 && errno != EINPROGRESS)
     {
         ::close(fd);
-        freeaddrinfo(res);
         return {};
     }
-    freeaddrinfo(res);
+    if (rc != 0)
+    {
+        pollfd pfd{};
+        pfd.fd = fd;
+        pfd.events = POLLOUT;
+        if (::poll(&pfd, 1, 2000) <= 0)
+        {
+            ::close(fd);
+            return {};
+        }
+        int so = 0;
+        socklen_t len = sizeof(so);
+        if (::getsockopt(fd, SOL_SOCKET, SO_ERROR, &so, &len) != 0 || so != 0)
+        {
+            ::close(fd);
+            return {};
+        }
+    }
+    ::fcntl(fd, F_SETFL, flags);
+    timeval tv{};
+    tv.tv_sec = 2;
+    ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
     std::string req = method + " " + path + " HTTP/1.1\r\nHost: " + host + "\r\nContent-Type: application/json\r\nContent-Length: " +
                       std::to_string(body.size()) + "\r\nConnection: close\r\n\r\n" + body;
     if (::send(fd, req.data(), req.size(), MSG_NOSIGNAL) < 0)
@@ -102,6 +132,36 @@ NmosNode::NmosNode(Config config)
         channel.format.flowId = uuidV5(base + "/flow/1920x1080@50/1/progressive");
         channel.flowId = channel.format.flowId;
     }
+    loadRoutes();
+}
+
+bool NmosNode::ready() const
+{
+    if (config_.nmosRegistryAddress.empty()) return true;
+    return registered_.load();
+}
+
+std::string NmosNode::origin() const
+{
+    return "http://" + config_.nmosHostAddress + ":" + std::to_string(config_.nmosPort);
+}
+
+std::string NmosNode::deviceLabel() const
+{
+    if (config_.nmosLabel == "MXL Color Corrector") return config_.nmosLabel;
+    return config_.nmosLabel + " Color Corrector";
+}
+
+std::string NmosNode::tagsJson() const
+{
+    Json obj = Json::object();
+    for (auto const& [key, values] : config_.nmosTags)
+    {
+        Json arr = Json::array();
+        for (auto const& value : values) arr.push(Json::str(value));
+        obj[key] = std::move(arr);
+    }
+    return obj.dump();
 }
 
 NmosNode::~NmosNode()
@@ -126,6 +186,14 @@ void NmosNode::stop()
 {
     stop_ = true;
     if (registry_.joinable()) registry_.join();
+    deregister();
+    registered_ = false;
+}
+
+void NmosNode::deregister() const
+{
+    if (config_.nmosRegistryAddress.empty() || nodeId_.empty()) return;
+    httpExchange(config_.nmosRegistryAddress, config_.nmosRegistryPort, "DELETE", "/x-nmos/registration/v1.3/resource/nodes/" + nodeId_, "");
 }
 
 std::string NmosNode::version() const
@@ -168,6 +236,7 @@ OutputFormat NmosNode::output(int channel) const
 void NmosNode::activate(Channel& channel)
 {
     channel.active = channel.staged;
+    persistRoutesUnlocked();
 }
 
 Json NmosNode::summary() const
@@ -267,6 +336,157 @@ std::string NmosNode::connectionJson(bool sender, Channel const& channel, Leg co
     return os.str();
 }
 
+void NmosNode::loadRoutes()
+{
+    std::ifstream in(config_.stateDir + "/routes.json");
+    if (!in) return;
+    std::stringstream buffer;
+    buffer << in.rdbuf();
+    if (buffer.str().empty()) return;
+    try
+    {
+        auto doc = parseJson(buffer.str());
+        auto const* list = doc.isArray() ? &doc : doc.find("routes");
+        if (list == nullptr || !list->isArray()) return;
+        for (auto const& item : list->a)
+        {
+            if (!item.isObject() || item.find("channel") == nullptr) continue;
+            int const channel = static_cast<int>(item.find("channel")->num());
+            if (channel < 1 || channel > static_cast<int>(channels_.size())) continue;
+            auto& slot = channels_[static_cast<std::size_t>(channel - 1)];
+            NmosNode::Leg leg;
+            if (auto const* master = item.find("master_enable"); master && master->isBool()) leg.master = master->b;
+            if (auto const* domain = item.find("mxl_domain_id"); domain && domain->isString()) leg.domainId = domain->s;
+            if (auto const* flow = item.find("mxl_flow_id"); flow && flow->isString()) leg.flowId = flow->s;
+            if (auto const* sender = item.find("sender_id"); sender && sender->isString()) leg.senderId = sender->s;
+            slot.staged = leg;
+            slot.active = leg;
+        }
+    }
+    catch (JsonError const&)
+    {
+    }
+}
+
+void NmosNode::persistRoutesUnlocked() const
+{
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    fs::create_directories(config_.stateDir, ec);
+    if (ec) return;
+    Json list = Json::array();
+    for (std::size_t i = 0; i < channels_.size(); ++i)
+    {
+        auto const& leg = channels_[i].active;
+        if (!leg.master && leg.flowId.empty() && leg.domainId.empty()) continue;
+        Json item = Json::object();
+        item["channel"] = Json::number(static_cast<double>(i + 1));
+        item["master_enable"] = Json::boolean(leg.master);
+        item["mxl_domain_id"] = leg.domainId.empty() ? Json::nul() : Json::str(leg.domainId);
+        item["mxl_flow_id"] = leg.flowId.empty() ? Json::nul() : Json::str(leg.flowId);
+        item["sender_id"] = leg.senderId.empty() ? Json::nul() : Json::str(leg.senderId);
+        list.push(std::move(item));
+    }
+    auto path = fs::path(config_.stateDir) / "routes.json";
+    auto tmp = path;
+    tmp += ".tmp";
+    std::ofstream out(tmp);
+    if (!out) return;
+    out << list.dump();
+    out.close();
+    fs::rename(tmp, path, ec);
+}
+
+Json NmosNode::exportRoutes() const
+{
+    std::lock_guard lock(mu_);
+    Json list = Json::array();
+    for (std::size_t i = 0; i < channels_.size(); ++i)
+    {
+        auto const& leg = channels_[i].active;
+        Json item = Json::object();
+        item["channel"] = Json::number(static_cast<double>(i + 1));
+        item["master_enable"] = Json::boolean(leg.master);
+        item["mxl_domain_id"] = leg.domainId.empty() ? Json::nul() : Json::str(leg.domainId);
+        item["mxl_flow_id"] = leg.flowId.empty() ? Json::nul() : Json::str(leg.flowId);
+        item["sender_id"] = leg.senderId.empty() ? Json::nul() : Json::str(leg.senderId);
+        list.push(std::move(item));
+    }
+    return list;
+}
+
+bool NmosNode::importRoutes(Json const& routes, std::string& error)
+{
+    auto const* list = routes.isArray() ? &routes : routes.find("routes");
+    if (list == nullptr || !list->isArray())
+    {
+        error = "routes must be an array";
+        return false;
+    }
+    std::lock_guard lock(mu_);
+    for (auto& channel : channels_)
+    {
+        channel.staged = {};
+        channel.active = {};
+    }
+    for (auto const& item : list->a)
+    {
+        if (!item.isObject() || item.find("channel") == nullptr)
+        {
+            error = "route needs a channel";
+            return false;
+        }
+        int const channel = static_cast<int>(item.find("channel")->num());
+        if (channel < 1 || channel > static_cast<int>(channels_.size()))
+        {
+            error = "route channel is out of range";
+            return false;
+        }
+        Leg leg;
+        if (auto const* master = item.find("master_enable"); master)
+        {
+            if (!master->isBool())
+            {
+                error = "master_enable must be a boolean";
+                return false;
+            }
+            leg.master = master->b;
+        }
+        if (auto const* domain = item.find("mxl_domain_id"); domain && !domain->isNull())
+        {
+            if (!domain->isString() || !isUuid(domain->s))
+            {
+                error = "mxl_domain_id must be a UUID";
+                return false;
+            }
+            leg.domainId = domain->s;
+        }
+        if (auto const* flow = item.find("mxl_flow_id"); flow && !flow->isNull())
+        {
+            if (!flow->isString() || !isUuid(flow->s))
+            {
+                error = "mxl_flow_id must be a UUID";
+                return false;
+            }
+            leg.flowId = flow->s;
+        }
+        if (auto const* sender = item.find("sender_id"); sender && !sender->isNull())
+        {
+            if (!sender->isString() || !isUuid(sender->s))
+            {
+                error = "sender_id must be a UUID";
+                return false;
+            }
+            leg.senderId = sender->s;
+        }
+        auto& slot = channels_[static_cast<std::size_t>(channel - 1)];
+        slot.staged = leg;
+        slot.active = leg;
+    }
+    persistRoutesUnlocked();
+    return true;
+}
+
 bool NmosNode::postRegistry(std::string const& body) const
 {
     auto response = httpExchange(config_.nmosRegistryAddress, config_.nmosRegistryPort, "POST", "/x-nmos/registration/v1.3/resource", body);
@@ -283,11 +503,13 @@ void NmosNode::registryLoop()
         {
             std::lock_guard lock(mu_);
             auto v = version();
-            auto href = "http://" + config_.hostId + ":" + std::to_string(config_.nmosPort);
-            node = std::string("{\"type\":\"node\",\"data\":{\"id\":\"") + nodeId_ + "\",\"version\":\"" + v + "\",\"label\":\"" + escape(config_.hostId) +
-                   "\",\"description\":\"MXL Color Corrector\",\"href\":\"" + href + "/x-nmos/node/v1.3/self\",\"hostname\":\"" + escape(config_.hostId) +
-                   "\",\"api\":{\"versions\":[\"v1.3\"],\"endpoints\":[{\"host\":\"" + escape(config_.hostId) + "\",\"port\":" +
-                   std::to_string(config_.nmosPort) + ",\"protocol\":\"http\"}]},\"caps\":{},\"services\":[],\"clocks\":[{\"name\":\"clk0\",\"ref_type\":\"internal\"}],\"tags\":{}}}";
+            auto href = origin();
+            auto tags = tagsJson();
+            node = std::string("{\"type\":\"node\",\"data\":{\"id\":\"") + nodeId_ + "\",\"version\":\"" + v + "\",\"label\":\"" + escape(config_.nmosLabel) +
+                   "\",\"description\":\"MXL Color Corrector\",\"href\":\"" + href + "/x-nmos/node/v1.3/self\",\"hostname\":\"" + escape(config_.nmosHostAddress) +
+                   "\",\"api\":{\"versions\":[\"v1.3\"],\"endpoints\":[{\"host\":\"" + escape(config_.nmosHostAddress) + "\",\"port\":" +
+                   std::to_string(config_.nmosPort) + ",\"protocol\":\"http\"}]},\"caps\":{},\"services\":[],\"clocks\":[{\"name\":\"clk0\",\"ref_type\":\"internal\"}],\"tags\":" +
+                   tags + "}}";
             std::string senders = "[";
             std::string receivers = "[";
             for (std::size_t i = 0; i < channels_.size(); ++i)
@@ -323,15 +545,18 @@ void NmosNode::registryLoop()
             }
             senders += "]";
             receivers += "]";
-            device = std::string("{\"type\":\"device\",\"data\":{\"id\":\"") + deviceId_ + "\",\"version\":\"" + v +
-                     "\",\"label\":\"MXL Color Corrector\",\"description\":\"Live RGB gain and pedestal corrector\",\"type\":\"urn:x-nmos:device:generic\","
+            device = std::string("{\"type\":\"device\",\"data\":{\"id\":\"") + deviceId_ + "\",\"version\":\"" + v + "\",\"label\":\"" + escape(deviceLabel()) +
+                     "\",\"description\":\"Live RGB gain and pedestal corrector\",\"type\":\"urn:x-nmos:device:generic\","
                      "\"node_id\":\"" +
-                     nodeId_ + "\",\"senders\":" + senders + ",\"receivers\":" + receivers + ",\"controls\":[],\"tags\":{}}}";
+                     nodeId_ + "\",\"senders\":" + senders + ",\"receivers\":" + receivers + ",\"controls\":[],\"tags\":" + tags + "}}";
         }
         bool ok = postRegistry(node) && postRegistry(device);
         for (auto const& resource : resources) ok = postRegistry(resource) && ok;
         auto health = httpExchange(config_.nmosRegistryAddress, config_.nmosRegistryPort, "POST", "/x-nmos/registration/v1.3/health/nodes/" + nodeId_, "");
         ok = ok && (health.find(" 200 ") != std::string::npos || health.find(" 204 ") != std::string::npos);
+        auto const queryHost = config_.nmosQueryAddress.empty() ? config_.nmosRegistryAddress : config_.nmosQueryAddress;
+        auto query = httpExchange(queryHost, config_.nmosQueryPort, "GET", "/x-nmos/query/v1.3/nodes/" + nodeId_, "");
+        ok = ok && query.find(" 200 ") != std::string::npos;
         {
             std::lock_guard lock(mu_);
             registered_ = ok;
@@ -352,7 +577,7 @@ void NmosNode::handle(HttpRequest const& req, HttpResponse& res)
     auto path = req.path;
     if (!path.empty() && path.back() == '/') path.pop_back();
     auto v = version();
-    auto base = "http://" + config_.hostId + ":" + std::to_string(config_.nmosPort);
+    auto base = origin();
     auto text = [&](std::string body) {
         res.status = 200;
         res.contentType = "application/json";
@@ -390,10 +615,11 @@ void NmosNode::handle(HttpRequest const& req, HttpResponse& res)
     }
     if (path == "/x-nmos/node/v1.3/self")
     {
-        text("{\"id\":\"" + nodeId_ + "\",\"version\":\"" + v + "\",\"label\":\"" + escape(config_.hostId) +
-             "\",\"description\":\"MXL Color Corrector\",\"hostname\":\"" + escape(config_.hostId) + "\",\"href\":\"" + base +
-             "/x-nmos/node/v1.3/self\",\"api\":{\"versions\":[\"v1.3\"],\"endpoints\":[{\"host\":\"" + escape(config_.hostId) + "\",\"port\":" +
-             std::to_string(config_.nmosPort) + ",\"protocol\":\"http\"}]},\"caps\":{},\"services\":[],\"clocks\":[{\"name\":\"clk0\",\"ref_type\":\"internal\"}],\"tags\":{}}");
+        text("{\"id\":\"" + nodeId_ + "\",\"version\":\"" + v + "\",\"label\":\"" + escape(config_.nmosLabel) +
+             "\",\"description\":\"MXL Color Corrector\",\"hostname\":\"" + escape(config_.nmosHostAddress) + "\",\"href\":\"" + base +
+             "/x-nmos/node/v1.3/self\",\"api\":{\"versions\":[\"v1.3\"],\"endpoints\":[{\"host\":\"" + escape(config_.nmosHostAddress) + "\",\"port\":" +
+             std::to_string(config_.nmosPort) + ",\"protocol\":\"http\"}]},\"caps\":{},\"services\":[],\"clocks\":[{\"name\":\"clk0\",\"ref_type\":\"internal\"}],\"tags\":" +
+             tagsJson() + "}");
         return;
     }
     if (path == "/x-nmos/node/v1.3/devices" || path == "/x-nmos/node/v1.3/devices/" + deviceId_)
@@ -410,10 +636,10 @@ void NmosNode::handle(HttpRequest const& req, HttpResponse& res)
             senders += "\"" + channels_[i].senderId + "\"";
             receivers += "\"" + channels_[i].receiverId + "\"";
         }
-        auto device = std::string("{\"id\":\"") + deviceId_ + "\",\"version\":\"" + v +
-                      "\",\"label\":\"MXL Color Corrector\",\"description\":\"Live RGB gain and pedestal corrector\","
+        auto device = std::string("{\"id\":\"") + deviceId_ + "\",\"version\":\"" + v + "\",\"label\":\"" + escape(deviceLabel()) +
+                      "\",\"description\":\"Live RGB gain and pedestal corrector\","
                       "\"type\":\"urn:x-nmos:device:generic\",\"node_id\":\"" +
-                      nodeId_ + "\",\"senders\":[" + senders + "],\"receivers\":[" + receivers + "],\"controls\":[],\"tags\":{}}";
+                      nodeId_ + "\",\"senders\":[" + senders + "],\"receivers\":[" + receivers + "],\"controls\":[],\"tags\":" + tagsJson() + "}";
         if (path.find(deviceId_) != std::string::npos) text(device);
         else text("[" + device + "]");
         return;

@@ -66,6 +66,17 @@ TEST_CASE("http api validates controls and serves health")
     CHECK(ok.find("200") != std::string::npos);
     CHECK(store.live(1).gain == 50);
     CHECK(store.live(1).saturation == 0);
+    auto ready = httpGet(server.port(), "GET", "/readyz");
+    CHECK(ready.find("200") != std::string::npos);
+    auto exported = httpGet(server.port(), "GET", "/api/v1/config/export");
+    CHECK(exported.find("\"version\":") != std::string::npos);
+    CHECK(exported.find("\"routes\"") != std::string::npos);
+    auto imported = httpGet(server.port(), "POST", "/api/v1/config/import",
+        "{\"channels\":[{\"active\":\"a\",\"a\":{\"gain\":70},\"b\":{\"gain\":100}}],\"presets\":[],\"routes\":[{\"channel\":1,\"master_enable\":true,\"mxl_domain_id\":\"11111111-1111-4111-8111-111111111111\",\"mxl_flow_id\":\"22222222-2222-4222-8222-222222222222\"}]}");
+    CHECK(imported.find("200") != std::string::npos);
+    CHECK(store.live(1).gain == 70);
+    CHECK(nmos.route(1).enable);
+    CHECK(nmos.route(1).flowId == "22222222-2222-4222-8222-222222222222");
     auto page = httpGet(server.port(), "GET", "/");
     CHECK(page.find("text/html") != std::string::npos);
     auto metrics = httpGet(server.port(), "GET", "/metrics");

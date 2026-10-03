@@ -15,13 +15,15 @@ spec:
         app: mxl-color-corrector
         io.dmf.mxl.revision: "218ddaa0a08c12ffe75fc475ae65aa3d9eef16d7"
     spec:
+      terminationGracePeriodSeconds: 20
       securityContext:
         runAsUser: 1000
         runAsGroup: 1000
         fsGroup: 1000
+        supplementalGroups: [1000]
       containers:
         - name: corrector
-          image: ghcr.io/leeo86/mxl-color-corrector:latest
+          image: ghcr.io/leeo86/mxl-color-corrector:1.0.0
           imagePullPolicy: IfNotPresent
           ports:
             - name: web
@@ -35,6 +37,24 @@ spec:
               value: /Volumes/mxl
             - name: MXL_OUTPUT_DOMAIN_DIR
               value: /Volumes/mxl/cc
+            - name: MXL_CLEANUP_ON_EXIT
+              value: "true"
+            - name: NMOS_SEED
+              value: production-cc
+            - name: NMOS_LABEL
+              value: production-cc
+            - name: NMOS_TAGS
+              value: '{"urn:x-srf:production":["production"],"urn:x-srf:function":["cc"]}'
+            - name: NMOS_HOST_ADDRESS
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: NMOS_REGISTRY_ADDRESS
+              value: nmos-registry
+            - name: NMOS_REGISTRY_PORT
+              value: "3210"
+            - name: NMOS_QUERY_PORT
+              value: "3211"
             - name: NMOS_DNS_SD
               value: "false"
             - name: WEB_PORT
@@ -43,6 +63,8 @@ spec:
               value: "3292"
             - name: CC_STATE_DIR
               value: /config
+            - name: SHUTDOWN_TIMEOUT_S
+              value: "10"
           readinessProbe:
             httpGet:
               path: /readyz
@@ -52,8 +74,6 @@ spec:
               path: /livez
               port: web
           resources:
-            # One 1080p50 channel is a fraction of a core without RGB clip.
-            # Request one core per channel and double it when RGB gamut clip is on.
             requests:
               cpu: "2"
               memory: 1Gi

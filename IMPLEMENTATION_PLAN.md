@@ -1,5 +1,26 @@
 # Implementation notes
 
+## Platform guideline G1–G14
+
+| Id | Status | Evidence |
+| --- | --- | --- |
+| G1 Configuration | met | Env then `CC_CONFIG_FILE` then defaults, unknown env ignored, invalid values throw `ConfigError` and `main` exits 78 (`src/config.cpp`, `src/main.cpp`). State only under `CC_STATE_DIR` (default `/config`). No secrets. Table in `README.md`. |
+| G2 MXL domains | met | Scan parent `MXL_DOMAIN_SCAN_PATH`. Own domain created by `openOwn` (`src/engine.cpp`); a different existing id is logged and not overwritten (exit 78). Input domains use `openReadOnly` (no writes, no garbage collection). `options.json` is written only when absent. `MXL_HISTORY_DURATION_NS`. |
+| G3 NMOS identity | met | UUIDv5 from `NMOS_SEED` for node, device, sources, flows, senders, receivers and the default domain id (`src/nmos.cpp` constructor, `src/config.cpp`). `NMOS_LABEL` and `NMOS_TAGS` on the node and device. Group hints stay on the flows. |
+| G4 Registry, no DNS-SD | met | `NMOS_REGISTRY_*` and `NMOS_QUERY_*` (query defaults to registry port + 1). `NMOS_DNS_SD` defaults false. There is no DNS-SD browse and no mDNS advertisement, so no Avahi or D-Bus, and the nmos-cpp `pri`/`highest_pri` switch is N/A. |
+| G5 Announce addresses | met | `selectHostAddress` (`src/config.cpp`) accepts only a non-loopback IP literal. `HOST_ID` is an alias only when it is already an IP. Href and `api.endpoints[].host` use that address (`src/nmos.cpp`). No SDP, ICE or SRT. The UI does not offer a hostname to copy. |
+| G6 Ports | met | `WEB_PORT` and `NMOS_PORT` are the only listeners. Bind failure exits 75 (`src/main.cpp`). Nothing listens on `NMOS_PORT+1` (no NMOS control WebSocket); documented in the README. |
+| G7 Health and metrics | met | `/livez` is liveness. `/readyz` is 200 only when serving, and when a registry is set only after the Query API returns the node (`src/api.cpp`, `src/nmos.cpp`). Metrics prefix `mxl_color_corrector_`. |
+| G8 Clean shutdown | met | SIGTERM calls `Engine::shutdown` (release readers and writers), `NmosNode::deregister` (DELETE the node), then removes the output domain when `MXL_CLEANUP_ON_EXIT=true` (`src/main.cpp`). Exit 143. `SHUTDOWN_TIMEOUT_S` default 10. No child processes. |
+| G9 IS-05 | met | Senders expose `mxl_domain_id` and `mxl_flow_id`. Receivers accept staged PATCH with `sender_id`, `master_enable`, `transport_params` and `activate_immediate`. `master_enable: false` makes `route().enable` false and the worker releases the reader. Routes persist in `CC_STATE_DIR/routes.json`. |
+| G10 Export and import | met | `GET /api/v1/config/export` and `POST /api/v1/config/import` (`src/api.cpp`). Import applies channels, presets and routes. The settings snapshot is informational. No secrets. Preset endpoints remain. Layouts are N/A (this function has none). |
+| G11 Image and CI | met | `.github/workflows/ci.yml` tests. `.github/workflows/publish.yml` pushes `ghcr.io/leeo86/mxl-color-corrector` as `git-<sha7>` and `nightly-dev` on `main`, and `X.Y.Z`, `X.Y`, `X` on `vX.Y.Z` (version tags are not reused). Runtime uid 1000. OCI labels in `docker/Dockerfile`. The Deployment and Compose file reference `1.0.0`. |
+| G12 Kubernetes example | met | `deploy/k8s/deployment.yaml`: pod network, standard env, probes, grace 20s, MXL hostPath, `/config`, uid/gid 1000, `supplementalGroups: [1000]`, no `hostIPC`, no extra capabilities. |
+| G13 Documentation | met | `README.md` settings, ports, exit codes, API, platform run. `CHANGELOG.md` 1.0.0. `SPECIFICATION.md` configuration table matches the code. |
+| G14 Tests | met | `tests/unit/test_config.cpp` covers the new settings and address rules. `tests/unit/test_api.cpp` covers export/import and a restored route. `tests/integration/lifecycle.py` covers start, `/readyz`, SIGTERM, deregistration and domain removal. `tests/integration/correct.py` covers the picture. |
+
+# Implementation notes
+
 Pinned MXL: `dmf-mxl/mxl` `release/v1.1` at `218ddaa0a08c12ffe75fc475ae65aa3d9eef16d7`, Fabrics off. The library is built from that git tag inside CMake (same sources the platform pin builds).
 
 ## Behaviour choices

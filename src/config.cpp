@@ -3,6 +3,10 @@
 #include "util/json.hpp"
 #include "util/uuid.hpp"
 
+#include <ifaddrs.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+
 #include <algorithm>
 #include <cstdlib>
 #include <fstream>
@@ -39,7 +43,77 @@ std::string lookup(std::map<std::string, std::string> const& env, std::map<std::
     if (auto it = file.find(key); it != file.end()) return it->second;
     return fallback;
 }
+
+bool provided(std::map<std::string, std::string> const& env, std::map<std::string, std::string> const& file, char const* key)
+{
+    return env.find(key) != env.end() || file.find(key) != file.end();
+}
+
+std::uint64_t parseU64(std::string const& text, bool& ok)
+{
+    ok = false;
+    if (text.empty()) return 0;
+    char* end = nullptr;
+    unsigned long long v = std::strtoull(text.c_str(), &end, 10);
+    if (end == text.c_str() || *end != '\0') return 0;
+    ok = true;
+    return static_cast<std::uint64_t>(v);
+}
 } // namespace
+
+bool isAnnouncedAddress(std::string const& text)
+{
+    if (text.empty() || text == "0.0.0.0" || text == "::" || text == "::1") return false;
+    in_addr ipv4{};
+    if (inet_pton(AF_INET, text.c_str(), &ipv4) == 1)
+    {
+        auto const oct = ntohl(ipv4.s_addr);
+        if ((oct >> 24) == 127) return false;
+        return true;
+    }
+    in6_addr ipv6{};
+    if (text.find(':') != std::string::npos && inet_pton(AF_INET6, text.c_str(), &ipv6) == 1)
+    {
+        return true;
+    }
+    return false;
+}
+
+std::string firstNonLoopbackIpv4()
+{
+    ifaddrs* list = nullptr;
+    if (getifaddrs(&list) != 0) return {};
+    std::string found;
+    for (auto* it = list; it != nullptr; it = it->ifa_next)
+    {
+        if (it->ifa_addr == nullptr || it->ifa_addr->sa_family != AF_INET) continue;
+        char buf[INET_ADDRSTRLEN] = {};
+        auto const* addr = reinterpret_cast<sockaddr_in const*>(it->ifa_addr);
+        if (inet_ntop(AF_INET, &addr->sin_addr, buf, sizeof(buf)) == nullptr) continue;
+        if (isAnnouncedAddress(buf))
+        {
+            found = buf;
+            break;
+        }
+    }
+    freeifaddrs(list);
+    return found;
+}
+
+std::string selectHostAddress(std::string const& configured, std::string const& hostIdAlias, std::string const& detected)
+{
+    if (!configured.empty())
+    {
+        if (!isAnnouncedAddress(configured))
+        {
+            throw ConfigError("NMOS_HOST_ADDRESS must be a non-loopback IP address, not a hostname");
+        }
+        return configured;
+    }
+    if (isAnnouncedAddress(hostIdAlias)) return hostIdAlias;
+    if (isAnnouncedAddress(detected)) return detected;
+    throw ConfigError("NMOS_HOST_ADDRESS is unset and no non-loopback IPv4 address was found");
+}
 
 std::string hostnameString()
 {
@@ -54,8 +128,9 @@ std::string hostnameString()
 bool knownSetting(std::string const& key)
 {
     static char const* keys[] = {"CC_CHANNELS", "MXL_DOMAIN_SCAN_PATH", "MXL_OUTPUT_DOMAIN_DIR", "MXL_OUTPUT_DOMAIN_ID", "CC_CLIP", "CC_RGB_CLIP",
-        "CC_READ_OFFSET_GRAINS", "NMOS_REGISTRY_ADDRESS", "NMOS_REGISTRY_PORT", "NMOS_DNS_SD", "NMOS_PORT", "NMOS_SEED", "WEB_PORT", "CC_CONFIG_FILE",
-        "HOST_ID", "CC_STATE_DIR", "CC_LOG_LEVEL", "CC_PREVIEW_FPS"};
+        "CC_READ_OFFSET_GRAINS", "MXL_HISTORY_DURATION_NS", "MXL_CLEANUP_ON_EXIT", "NMOS_REGISTRY_ADDRESS", "NMOS_REGISTRY_PORT", "NMOS_QUERY_ADDRESS",
+        "NMOS_QUERY_PORT", "NMOS_DNS_SD", "NMOS_PORT", "NMOS_SEED", "NMOS_LABEL", "NMOS_TAGS", "NMOS_HOST_ADDRESS", "WEB_PORT", "CC_CONFIG_FILE", "HOST_ID",
+        "CC_STATE_DIR", "CC_LOG_LEVEL", "CC_PREVIEW_FPS", "SHUTDOWN_TIMEOUT_S"};
     for (auto const* k : keys)
     {
         if (key == k) return true;
@@ -73,8 +148,11 @@ Config loadConfig(std::map<std::string, std::string> const& env, std::map<std::s
         }
     }
     Config cfg;
+    bool const hostIdSet = provided(env, file, "HOST_ID");
     cfg.hostId = lookup(env, file, "HOST_ID", hostnameString());
     cfg.configFile = lookup(env, file, "CC_CONFIG_FILE", "");
+    auto const label = lookup(env, file, "NMOS_LABEL", "");
+    cfg.nmosLabel = !label.empty() ? label : (hostIdSet ? cfg.hostId : "MXL Color Corrector");
     bool ok = true;
     cfg.channels = parseInt(lookup(env, file, "CC_CHANNELS", "2"), ok);
     if (!ok || cfg.channels < 1 || cfg.channels > 16)
@@ -111,6 +189,23 @@ Config loadConfig(std::map<std::string, std::string> const& env, std::map<std::s
     {
         throw ConfigError("NMOS_REGISTRY_PORT is invalid");
     }
+    cfg.nmosQueryAddress = lookup(env, file, "NMOS_QUERY_ADDRESS", cfg.nmosRegistryAddress);
+    if (provided(env, file, "NMOS_QUERY_PORT"))
+    {
+        cfg.nmosQueryPort = parseInt(lookup(env, file, "NMOS_QUERY_PORT", ""), ok);
+        if (!ok || cfg.nmosQueryPort < 1 || cfg.nmosQueryPort > 65535)
+        {
+            throw ConfigError("NMOS_QUERY_PORT is invalid");
+        }
+    }
+    else if (cfg.nmosRegistryPort < 65535)
+    {
+        cfg.nmosQueryPort = cfg.nmosRegistryPort + 1;
+    }
+    else
+    {
+        throw ConfigError("NMOS_QUERY_PORT must be set when NMOS_REGISTRY_PORT is 65535");
+    }
     cfg.nmosDnsSd = parseBool(lookup(env, file, "NMOS_DNS_SD", "false"), ok);
     if (!ok)
     {
@@ -137,6 +232,54 @@ Config loadConfig(std::map<std::string, std::string> const& env, std::map<std::s
     if (!ok || cfg.previewFps < 1 || cfg.previewFps > 30)
     {
         throw ConfigError("CC_PREVIEW_FPS must be from 1 to 30");
+    }
+    cfg.shutdownTimeoutS = parseInt(lookup(env, file, "SHUTDOWN_TIMEOUT_S", "10"), ok);
+    if (!ok || cfg.shutdownTimeoutS < 1 || cfg.shutdownTimeoutS > 120)
+    {
+        throw ConfigError("SHUTDOWN_TIMEOUT_S must be from 1 to 120");
+    }
+    cfg.cleanupOnExit = parseBool(lookup(env, file, "MXL_CLEANUP_ON_EXIT", "false"), ok);
+    if (!ok)
+    {
+        throw ConfigError("MXL_CLEANUP_ON_EXIT must be true or false");
+    }
+    cfg.historyDurationNs = parseU64(lookup(env, file, "MXL_HISTORY_DURATION_NS", "200000000"), ok);
+    if (!ok || cfg.historyDurationNs == 0)
+    {
+        throw ConfigError("MXL_HISTORY_DURATION_NS must be a positive integer");
+    }
+    auto const tags = lookup(env, file, "NMOS_TAGS", "");
+    if (!tags.empty())
+    {
+        Json doc;
+        try
+        {
+            doc = parseJson(tags);
+        }
+        catch (JsonError const& ex)
+        {
+            throw ConfigError(std::string("NMOS_TAGS is not JSON: ") + ex.what());
+        }
+        if (!doc.isObject()) throw ConfigError("NMOS_TAGS must be a JSON object of string arrays");
+        for (auto const& [key, value] : doc.o)
+        {
+            if (!value.isArray()) throw ConfigError("NMOS_TAGS values must be arrays of strings");
+            std::vector<std::string> items;
+            for (auto const& item : value.a)
+            {
+                if (!item.isString()) throw ConfigError("NMOS_TAGS values must be arrays of strings");
+                items.push_back(item.s);
+            }
+            cfg.nmosTags.emplace_back(key, std::move(items));
+        }
+    }
+    try
+    {
+        cfg.nmosHostAddress = selectHostAddress(lookup(env, file, "NMOS_HOST_ADDRESS", ""), hostIdSet ? cfg.hostId : "", firstNonLoopbackIpv4());
+    }
+    catch (ConfigError const&)
+    {
+        throw;
     }
     if (cfg.outputDomainId.empty())
     {

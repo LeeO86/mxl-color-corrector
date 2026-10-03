@@ -1,4 +1,5 @@
-# Pod network is the host network so every service sees the same MXL tree.
+# Local demo only. The platform Deployment in deploy/k8s uses the pod network.
+# This file uses the host network so the demo processes share one MXL directory.
 # mxl-webrtc-monitor is optional: `docker compose --profile monitor up`.
 services:
   registry:
@@ -9,7 +10,7 @@ services:
       - ../tests/integration/fake_registry.py:/registry.py:ro
 
   pattern:
-    image: ghcr.io/leeo86/mxl-color-corrector:latest
+    image: ghcr.io/leeo86/mxl-color-corrector:1.0.0
     network_mode: host
     user: "1000:1000"
     entrypoint: ["/usr/local/bin/mxl-cc-pattern"]
@@ -30,7 +31,7 @@ services:
       - mxl:/Volumes/mxl
 
   corrector:
-    image: ghcr.io/leeo86/mxl-color-corrector:latest
+    image: ghcr.io/leeo86/mxl-color-corrector:1.0.0
     network_mode: host
     user: "1000:1000"
     depends_on:
@@ -42,6 +43,8 @@ services:
       MXL_OUTPUT_DOMAIN_ID: 33333333-3333-4333-8333-333333333333
       NMOS_REGISTRY_ADDRESS: 127.0.0.1
       NMOS_REGISTRY_PORT: "3210"
+      NMOS_QUERY_ADDRESS: 127.0.0.1
+      NMOS_QUERY_PORT: "3210"
       NMOS_DNS_SD: "false"
       WEB_PORT: "8140"
       NMOS_PORT: "3292"

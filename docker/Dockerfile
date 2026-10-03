@@ -29,5 +29,7 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
 COPY --from=build /usr/local/bin/mxl-color-corrector /usr/local/bin/mxl-cc-pattern /usr/local/bin/mxl-cc-sample /usr/local/bin/
 USER 1000
 EXPOSE 8140 3292
-LABEL io.dmf.mxl.revision="${MXL_REF}"
+LABEL org.opencontainers.image.source="https://github.com/LeeO86/mxl-color-corrector" \
+      org.opencontainers.image.licenses="MIT" \
+      io.dmf.mxl.revision="${MXL_REF}"
 ENTRYPOINT ["/usr/local/bin/mxl-color-corrector"]

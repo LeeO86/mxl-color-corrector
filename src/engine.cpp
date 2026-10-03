@@ -127,14 +127,47 @@ public:
         }
     }
 
-    mxlInstance open(std::string const& dir, std::string const& id, std::string const& label)
+    mxlInstance openReadOnly(std::string const& dir)
     {
+        std::lock_guard lock(mu_);
+        if (auto it = open_.find(dir); it != open_.end()) return it->second;
+        if (!std::filesystem::is_directory(dir)) return nullptr;
+        auto* instance = mxlCreateInstance(dir.c_str(), nullptr);
+        if (instance == nullptr) return nullptr;
+        open_[dir] = instance;
+        return instance;
+    }
+
+    // Creates this function's own domain. Does not rewrite an existing
+    // domain_def.json or options.json. Returns nullptr and sets idMismatch
+    // when a definition is already there for a different id.
+    mxlInstance openOwn(std::string const& dir, std::string const& id, std::string const& label, std::uint64_t historyNs, bool& idMismatch)
+    {
+        idMismatch = false;
         std::lock_guard lock(mu_);
         if (auto it = open_.find(dir); it != open_.end()) return it->second;
         std::error_code ec;
         std::filesystem::create_directories(dir, ec);
         auto def = std::filesystem::path(dir) / "domain_def.json";
-        if (!std::filesystem::exists(def))
+        if (std::filesystem::exists(def))
+        {
+            std::string existing;
+            try
+            {
+                auto doc = parseJson(readFile(def));
+                if (auto const* found = doc.find("id")) existing = found->text();
+            }
+            catch (JsonError const&)
+            {
+            }
+            if (existing != id)
+            {
+                idMismatch = true;
+                logError("domain_def.json in " + dir + " has id " + existing + " which does not match MXL_OUTPUT_DOMAIN_ID " + id);
+                return nullptr;
+            }
+        }
+        else
         {
             std::ofstream out(def);
             out << "{\"id\":\"" << id << "\",\"label\":\"" << label << "\"}\n";
@@ -143,13 +176,23 @@ public:
         if (!std::filesystem::exists(options))
         {
             std::ofstream out(options);
-            out << "{\"urn:x-mxl:option:history_duration/v1.0\": 200000000}\n";
+            out << "{\"urn:x-mxl:option:history_duration/v1.0\": " << historyNs << "}\n";
         }
         auto* instance = mxlCreateInstance(dir.c_str(), nullptr);
         if (instance == nullptr) return nullptr;
         mxlGarbageCollectFlows(instance);
         open_[dir] = instance;
         return instance;
+    }
+
+    void closeAll()
+    {
+        std::lock_guard lock(mu_);
+        for (auto& [_, instance] : open_)
+        {
+            if (instance) mxlDestroyInstance(instance);
+        }
+        open_.clear();
     }
 
     std::map<std::string, std::string> scan(std::string const& root) const
@@ -212,7 +255,12 @@ struct Engine::Impl
 
     void ensureOutput()
     {
-        output = domains.open(config.outputDomainDir, config.outputDomainId, "MXL Color Corrector");
+        bool mismatch = false;
+        output = domains.openOwn(config.outputDomainDir, config.outputDomainId, "MXL Color Corrector", config.historyDurationNs, mismatch);
+        if (mismatch)
+        {
+            throw std::runtime_error("domain_def.json id does not match MXL_OUTPUT_DOMAIN_ID");
+        }
         if (output == nullptr)
         {
             throw std::runtime_error("mxlCreateInstance failed for " + config.outputDomainDir);
@@ -304,7 +352,7 @@ struct Engine::Impl
                     backoffMs = std::min(2000, backoffMs * 2);
                     continue;
                 }
-                sourceInstance = domains.open(it->second, route.domainId, "source");
+                sourceInstance = domains.openReadOnly(it->second);
                 if (sourceInstance == nullptr)
                 {
                     std::this_thread::sleep_for(std::chrono::milliseconds(backoffMs));
@@ -620,6 +668,19 @@ void Engine::stop()
 {
     if (!impl_) return;
     impl_->stop.store(true);
+}
+
+void Engine::shutdown()
+{
+    if (!impl_) return;
+    impl_->stop.store(true);
+    for (auto& thread : impl_->threads)
+    {
+        if (thread.joinable()) thread.join();
+    }
+    impl_->threads.clear();
+    impl_->domains.closeAll();
+    impl_->output = nullptr;
 }
 
 } // namespace cc

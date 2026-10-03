@@ -14,6 +14,7 @@
 #include <chrono>
 #include <csignal>
 #include <cstring>
+#include <filesystem>
 #include <iostream>
 #include <map>
 #include <memory>
@@ -91,21 +92,31 @@ int main()
         cc::Engine engine(config, store, runtime, nmos);
         nmos.start();
         engine.start();
-        cc::logInfo("web port " + std::to_string(web.port()) + " nmos port " + std::to_string(config.nmosPort));
+        cc::logInfo("web port " + std::to_string(web.port()) + " nmos port " + std::to_string(config.nmosPort) + " address " + config.nmosHostAddress);
         while (gSignal.load() == 0)
         {
             web.broadcast(cc::eventsHello(services));
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
         }
-        engine.stop();
+        auto const deadline = std::chrono::steady_clock::now() + std::chrono::seconds(config.shutdownTimeoutS);
+        engine.shutdown();
+        nmos.stop();
+        if (config.cleanupOnExit)
+        {
+            std::error_code ec;
+            std::filesystem::remove_all(config.outputDomainDir, ec);
+            if (ec) cc::logError("failed to remove output domain " + config.outputDomainDir + ": " + ec.message());
+            else cc::logInfo("removed output domain " + config.outputDomainDir);
+        }
+        if (std::chrono::steady_clock::now() > deadline) cc::logWarn("shutdown exceeded SHUTDOWN_TIMEOUT_S");
     }
     catch (std::exception const& ex)
     {
         cc::logError(ex.what());
         nmos.stop();
-        return 75;
+        auto const message = std::string(ex.what());
+        return message.find("domain_def.json") != std::string::npos ? 78 : 75;
     }
-    nmos.stop();
     web.stop();
     if (nmosHttp) nmosHttp->stop();
     return gSignal.load() == SIGTERM ? 143 : 0;
