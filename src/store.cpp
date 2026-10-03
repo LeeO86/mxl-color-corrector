@@ -507,6 +507,86 @@ bool ControlStore::importPresets(Json const& doc, std::string& error)
     return true;
 }
 
+Json ControlStore::exportBundle() const
+{
+    std::lock_guard lock(mu_);
+    Json doc = Json::object();
+    Json channels = Json::array();
+    for (auto const& slots : channels_)
+    {
+        Json item = Json::object();
+        item["active"] = Json::str(slots.active == 'b' ? "b" : "a");
+        item["a"] = controlsToJson(slots.a);
+        item["b"] = controlsToJson(slots.b);
+        channels.push(std::move(item));
+    }
+    doc["channels"] = std::move(channels);
+    Json presets = Json::array();
+    for (auto const& preset : presets_)
+    {
+        Json obj = presetToJson(preset);
+        obj["channel"] = Json::number(preset.channel);
+        presets.push(std::move(obj));
+    }
+    doc["presets"] = std::move(presets);
+    return doc;
+}
+
+bool ControlStore::importBundle(Json const& doc, std::string& error)
+{
+    std::lock_guard lock(mu_);
+    auto const* channels = doc.find("channels");
+    if (channels == nullptr || !channels->isArray())
+    {
+        error = "channels must be an array";
+        return false;
+    }
+    if (channels->a.size() != channels_.size())
+    {
+        error = "imported channel count does not match CC_CHANNELS";
+        return false;
+    }
+    for (std::size_t i = 0; i < channels_.size(); ++i)
+    {
+        auto const& item = channels->a[i];
+        Controls a = defaultControls();
+        Controls b = defaultControls();
+        if (auto const* slot = item.find("a"))
+        {
+            if (!patchControls(a, *slot, error)) return false;
+        }
+        if (auto const* slot = item.find("b"))
+        {
+            if (!patchControls(b, *slot, error)) return false;
+        }
+        channels_[i].a = a;
+        channels_[i].b = b;
+        channels_[i].active = (item.find("active") && item.find("active")->text() == "b") ? 'b' : 'a';
+        ++generation_;
+        matrices_[i] = buildMatrix(channels_[i].live(), generation_);
+    }
+    if (auto const* presets = doc.find("presets"); presets && presets->isArray())
+    {
+        std::vector<Preset> incoming;
+        for (auto const& item : presets->a)
+        {
+            Preset preset;
+            int expect = 0;
+            if (auto const* ch = item.find("channel"))
+            {
+                preset.channel = static_cast<int>(ch->num());
+                expect = preset.channel == 0 ? static_cast<int>(channels_.size()) : 1;
+            }
+            if (!presetFromJson(item, preset, expect, error)) return false;
+            incoming.push_back(std::move(preset));
+        }
+        presets_ = std::move(incoming);
+    }
+    persistLocked();
+    if (listener_) listener_(0);
+    return true;
+}
+
 void ControlStore::setListener(std::function<void(int)> listener)
 {
     std::lock_guard lock(mu_);

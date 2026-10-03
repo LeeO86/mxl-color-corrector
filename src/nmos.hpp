@@ -4,6 +4,7 @@
 #include "http.hpp"
 #include "util/json.hpp"
 
+#include <atomic>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -46,7 +47,10 @@ public:
     [[nodiscard]] Json summary() const;
     [[nodiscard]] std::string nodeId() const { return nodeId_; }
     [[nodiscard]] std::string deviceId() const { return deviceId_; }
-    [[nodiscard]] bool registered() const { return registered_; }
+    [[nodiscard]] bool registered() const { return registered_.load(); }
+    [[nodiscard]] bool ready() const;
+    [[nodiscard]] Json exportRoutes() const;
+    bool importRoutes(Json const& routes, std::string& error);
 
 private:
     struct Leg
@@ -74,6 +78,12 @@ private:
     void activate(Channel& channel);
     void registryLoop();
     bool postRegistry(std::string const& body) const;
+    void deregister() const;
+    void loadRoutes();
+    void persistRoutesUnlocked() const;
+    [[nodiscard]] std::string origin() const;
+    [[nodiscard]] std::string deviceLabel() const;
+    [[nodiscard]] std::string tagsJson() const;
 
     Config config_;
     std::string nodeId_;
@@ -81,8 +91,8 @@ private:
     std::vector<Channel> channels_;
     mutable std::mutex mu_;
     std::thread registry_;
-    bool stop_ = false;
-    bool registered_ = false;
+    std::atomic<bool> stop_{false};
+    std::atomic<bool> registered_{false};
 };
 
 } // namespace cc

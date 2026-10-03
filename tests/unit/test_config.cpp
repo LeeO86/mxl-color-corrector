@@ -83,6 +83,38 @@ TEST_CASE("state roundtrip and presets")
     std::filesystem::remove_all(dir);
 }
 
+TEST_CASE("platform settings and address aliases")
+{
+    auto cfg = loadConfig({{"NMOS_SEED", "sport-cc"}, {"NMOS_HOST_ADDRESS", "10.8.0.4"}, {"NMOS_REGISTRY_ADDRESS", "10.1.0.5"}, {"NMOS_REGISTRY_PORT", "4000"},
+                              {"NMOS_LABEL", "sport-cc"}, {"NMOS_TAGS", "{\"urn:x-srf:production\":[\"sport-sa\"],\"urn:x-srf:function\":[\"cc1\"]}"}},
+        {});
+    CHECK(cfg.nmosHostAddress == "10.8.0.4");
+    CHECK(cfg.nmosQueryAddress == "10.1.0.5");
+    CHECK(cfg.nmosQueryPort == 4001);
+    CHECK(cfg.nmosLabel == "sport-cc");
+    CHECK(cfg.nmosTags.size() == 2);
+    CHECK(cfg.cleanupOnExit == false);
+    CHECK(cfg.shutdownTimeoutS == 10);
+    CHECK(cfg.historyDurationNs == 200000000);
+    auto again = loadConfig({{"NMOS_SEED", "sport-cc"}, {"NMOS_HOST_ADDRESS", "10.9.0.4"}}, {});
+    CHECK(cfg.outputDomainId == again.outputDomainId);
+
+    auto aliased = loadConfig({{"HOST_ID", "10.2.0.9"}, {"NMOS_SEED", "s"}}, {});
+    CHECK(aliased.nmosHostAddress == "10.2.0.9");
+    CHECK(aliased.nmosLabel == "10.2.0.9");
+    auto named = loadConfig({{"HOST_ID", "color-a"}, {"NMOS_HOST_ADDRESS", "10.2.0.9"}, {"NMOS_SEED", "s"}}, {});
+    CHECK(named.nmosHostAddress == "10.2.0.9");
+    CHECK(named.nmosLabel == "color-a");
+
+    CHECK_THROWS_AS(loadConfig({{"NMOS_HOST_ADDRESS", "color.example"}}, {}), ConfigError);
+    CHECK_THROWS_AS(loadConfig({{"NMOS_HOST_ADDRESS", "127.0.0.1"}}, {}), ConfigError);
+    CHECK_THROWS_AS(loadConfig({{"NMOS_HOST_ADDRESS", "0.0.0.0"}}, {}), ConfigError);
+    CHECK_THROWS_AS(loadConfig({{"NMOS_TAGS", "{\"bad\":1}"}}, {}), ConfigError);
+    CHECK_THROWS_AS(loadConfig({{"MXL_CLEANUP_ON_EXIT", "maybe"}}, {}), ConfigError);
+    CHECK(isAnnouncedAddress("10.1.2.3"));
+    CHECK_FALSE(isAnnouncedAddress("not-an-ip"));
+}
+
 TEST_CASE("uuid v5 is deterministic")
 {
     auto a = uuidV5("mxl-color-corrector/demo/node");

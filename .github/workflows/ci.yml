@@ -31,3 +31,7 @@ jobs:
         run: python3 tests/integration/correct.py
         env:
           CC_BUILD: build
+      - name: lifecycle
+        run: python3 tests/integration/lifecycle.py
+        env:
+          CC_BUILD: build

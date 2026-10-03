@@ -144,7 +144,16 @@ void dispatchHttp(Services const& services, HttpRequest const& req, HttpResponse
     if (path == "/readyz")
     {
         res.contentType = "text/plain";
-        res.body = "ok\n";
+        if (services.nmos->ready())
+        {
+            res.status = 200;
+            res.body = "ok\n";
+        }
+        else
+        {
+            res.status = 503;
+            res.body = "not registered\n";
+        }
         return;
     }
     if (path == "/metrics")
@@ -161,6 +170,55 @@ void dispatchHttp(Services const& services, HttpRequest const& req, HttpResponse
     if (path == "/api/v1/nmos")
     {
         res.body = services.nmos->summary().dump();
+        return;
+    }
+    if (path == "/api/v1/config/export" && req.method == "GET")
+    {
+        auto bundle = services.store->exportBundle();
+        Json doc = Json::object();
+        doc["version"] = Json::str("1.0.0");
+        doc["channels"] = std::move(bundle["channels"]);
+        doc["presets"] = std::move(bundle["presets"]);
+        doc["routes"] = services.nmos->exportRoutes();
+        auto const& cfg = services.store->config();
+        Json settings = Json::object();
+        settings["CC_CHANNELS"] = Json::number(cfg.channels);
+        settings["CC_CLIP"] = Json::str(clipModeName(cfg.clip));
+        settings["CC_RGB_CLIP"] = Json::boolean(cfg.rgbClip);
+        settings["MXL_DOMAIN_SCAN_PATH"] = Json::str(cfg.scanPath);
+        settings["MXL_OUTPUT_DOMAIN_DIR"] = Json::str(cfg.outputDomainDir);
+        settings["MXL_OUTPUT_DOMAIN_ID"] = Json::str(cfg.outputDomainId);
+        settings["NMOS_SEED"] = Json::str(cfg.nmosSeed);
+        settings["NMOS_LABEL"] = Json::str(cfg.nmosLabel);
+        settings["NMOS_HOST_ADDRESS"] = Json::str(cfg.nmosHostAddress);
+        settings["WEB_PORT"] = Json::number(cfg.webPort);
+        settings["NMOS_PORT"] = Json::number(cfg.nmosPort);
+        doc["settings"] = std::move(settings);
+        res.body = doc.dump();
+        return;
+    }
+    if (path == "/api/v1/config/import" && (req.method == "POST" || req.method == "PUT"))
+    {
+        try
+        {
+            auto doc = parseJson(req.body);
+            std::string error;
+            if (!services.store->importBundle(doc, error))
+            {
+                jsonError(res, 400, error);
+                return;
+            }
+            if (doc.find("routes") != nullptr && !services.nmos->importRoutes(doc, error))
+            {
+                jsonError(res, 400, error);
+                return;
+            }
+            res.body = "{\"imported\":true}";
+        }
+        catch (JsonError const& ex)
+        {
+            jsonError(res, 400, ex.what());
+        }
         return;
     }
     if (path == "/api/v1/settings")

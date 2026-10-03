@@ -20,6 +20,7 @@ public:
 
     void start();
     void stop();
+    void shutdown();
 
 private:
     struct Impl;
