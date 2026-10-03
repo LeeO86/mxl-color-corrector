@@ -46,10 +46,3 @@ jobs:
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.licenses=MIT
             io.dmf.mxl.revision=218ddaa0a08c12ffe75fc475ae65aa3d9eef16d7
-      - name: keep the package public
-        run: |
-          set +e
-          gh api --method PATCH "/user/packages/container/mxl-color-corrector" -f visibility=public
-          gh api --method PATCH "/orgs/LeeO86/packages/container/mxl-color-corrector" -f visibility=public
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
