@@ -25,7 +25,7 @@ ARG MXL_REF=218ddaa0a08c12ffe75fc475ae65aa3d9eef16d7
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
-    && useradd --uid 1000 --create-home cc
+    && if ! id -u 1000 >/dev/null 2>&1; then useradd --uid 1000 --create-home cc; fi
 COPY --from=build /usr/local/bin/mxl-color-corrector /usr/local/bin/mxl-cc-pattern /usr/local/bin/mxl-cc-sample /usr/local/bin/
 USER 1000
 EXPOSE 8140 3292
