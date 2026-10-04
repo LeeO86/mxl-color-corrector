@@ -83,6 +83,8 @@ TEST_CASE("http api validates controls and serves health")
     CHECK(metrics.find("mxl_color_corrector_channel_state") != std::string::npos);
     auto nmosBody = httpGet(server.port(), "GET", "/x-nmos/node/v1.3/self");
     CHECK(nmosBody.find(nmos.nodeId()) != std::string::npos);
+    auto devices = httpGet(server.port(), "GET", "/x-nmos/node/v1.3/devices");
+    CHECK(devices.find("{\"href\":\"http://" + cfg.nmosHostAddress + ":" + std::to_string(cfg.nmosPort) + "/x-nmos/connection/v1.1/\",\"type\":\"urn:x-nmos:control:sr-ctrl/v1.1\"}") != std::string::npos);
     auto staged = httpGet(server.port(), "PATCH", "/x-nmos/connection/v1.1/single/receivers/" + [&] {
         auto summary = nmos.summary();
         return summary.find("channels")->a[0].find("receiver_id")->text();
@@ -93,6 +95,11 @@ TEST_CASE("http api validates controls and serves health")
     CHECK(route.enable);
     CHECK(route.domainId == "11111111-1111-4111-8111-111111111111");
     CHECK(route.flowId == "22222222-2222-4222-8222-222222222222");
+    auto receiverId = nmos.summary().find("channels")->a[0].find("receiver_id")->text();
+    auto off = httpGet(server.port(), "PATCH", "/x-nmos/connection/v1.1/single/receivers/" + receiverId + "/staged",
+        "{\"master_enable\":false,\"activation\":{\"mode\":\"activate_immediate\"}}");
+    CHECK(off.find("200") != std::string::npos);
+    CHECK_FALSE(nmos.route(1).enable);
     server.stop();
     std::filesystem::remove_all(dir);
 }

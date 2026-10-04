@@ -78,13 +78,13 @@ Two instances on one host need distinct `WEB_PORT` and `NMOS_PORT`. A port that 
 - `GET /api/v1/config/export`, `POST /api/v1/config/import`
 - `GET /api/v1/settings`, `GET /api/v1/nmos`
 - `WS /api/v1/events`
-- IS-04 `/x-nmos/node/v1.3/` and IS-05 `/x-nmos/connection/v1.1/single/` on `NMOS_PORT`
+- IS-04 `/x-nmos/node/v1.3/` and IS-05 `/x-nmos/connection/v1.1/single/` on `NMOS_PORT`; the device lists the IS-05 control `urn:x-nmos:control:sr-ctrl/v1.1` with href `http://NMOS_HOST_ADDRESS:NMOS_PORT/x-nmos/connection/v1.1/`
 
 Import restores channels, presets and IS-05 routes. The `settings` object in an export is a snapshot for `production-export`; import does not change ports or identity, which stay on the environment. There is nothing secret to omit.
 
 ## Platform
 
-The image is `ghcr.io/leeo86/mxl-color-corrector:1.0.1`, uid 1000, pod network, MXL root hostPath `/Volumes/mxl`, writable `/config`. `deploy/k8s/deployment.yaml` sets `NMOS_HOST_ADDRESS` from `status.podIP`, `MXL_CLEANUP_ON_EXIT=true`, and `terminationGracePeriodSeconds: 20`. `production-down` should SIGTERM and then see the node and this instance's domain disappear.
+The image is `ghcr.io/leeo86/mxl-color-corrector:1.0.2`, uid 1000, pod network, MXL root hostPath `/Volumes/mxl`, writable `/config`. `deploy/k8s/deployment.yaml` sets `NMOS_HOST_ADDRESS` from `status.podIP`, `MXL_CLEANUP_ON_EXIT=true`, and `terminationGracePeriodSeconds: 20`. `production-down` should SIGTERM and then see the node and this instance's domain disappear.
 
 ## Controls
 

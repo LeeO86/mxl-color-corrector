@@ -146,6 +146,13 @@ std::string NmosNode::origin() const
     return "http://" + config_.nmosHostAddress + ":" + std::to_string(config_.nmosPort);
 }
 
+// A controller finds the Connection API of a sender or receiver through this
+// control on its device.
+std::string NmosNode::controlsJson() const
+{
+    return "[{\"href\":\"" + origin() + "/x-nmos/connection/v1.1/\",\"type\":\"urn:x-nmos:control:sr-ctrl/v1.1\"}]";
+}
+
 std::string NmosNode::deviceLabel() const
 {
     if (config_.nmosLabel == "MXL Color Corrector") return config_.nmosLabel;
@@ -548,7 +555,7 @@ void NmosNode::registryLoop()
             device = std::string("{\"type\":\"device\",\"data\":{\"id\":\"") + deviceId_ + "\",\"version\":\"" + v + "\",\"label\":\"" + escape(deviceLabel()) +
                      "\",\"description\":\"Live RGB gain and pedestal corrector\",\"type\":\"urn:x-nmos:device:generic\","
                      "\"node_id\":\"" +
-                     nodeId_ + "\",\"senders\":" + senders + ",\"receivers\":" + receivers + ",\"controls\":[],\"tags\":" + tags + "}}";
+                     nodeId_ + "\",\"senders\":" + senders + ",\"receivers\":" + receivers + ",\"controls\":" + controlsJson() + ",\"tags\":" + tags + "}}";
         }
         bool ok = postRegistry(node) && postRegistry(device);
         for (auto const& resource : resources) ok = postRegistry(resource) && ok;
@@ -639,7 +646,7 @@ void NmosNode::handle(HttpRequest const& req, HttpResponse& res)
         auto device = std::string("{\"id\":\"") + deviceId_ + "\",\"version\":\"" + v + "\",\"label\":\"" + escape(deviceLabel()) +
                       "\",\"description\":\"Live RGB gain and pedestal corrector\","
                       "\"type\":\"urn:x-nmos:device:generic\",\"node_id\":\"" +
-                      nodeId_ + "\",\"senders\":[" + senders + "],\"receivers\":[" + receivers + "],\"controls\":[],\"tags\":" + tagsJson() + "}";
+                      nodeId_ + "\",\"senders\":[" + senders + "],\"receivers\":[" + receivers + "],\"controls\":" + controlsJson() + ",\"tags\":" + tagsJson() + "}";
         if (path.find(deviceId_) != std::string::npos) text(device);
         else text("[" + device + "]");
         return;
