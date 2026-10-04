@@ -23,7 +23,7 @@ spec:
         supplementalGroups: [1000]
       containers:
         - name: corrector
-          image: ghcr.io/leeo86/mxl-color-corrector:1.0.2
+          image: ghcr.io/leeo86/mxl-color-corrector:1.0.3
           imagePullPolicy: IfNotPresent
           ports:
             - name: web

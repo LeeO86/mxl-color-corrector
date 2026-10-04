@@ -515,7 +515,7 @@ void NmosNode::registryLoop()
             node = std::string("{\"type\":\"node\",\"data\":{\"id\":\"") + nodeId_ + "\",\"version\":\"" + v + "\",\"label\":\"" + escape(config_.nmosLabel) +
                    "\",\"description\":\"MXL Color Corrector\",\"href\":\"" + href + "/x-nmos/node/v1.3/self\",\"hostname\":\"" + escape(config_.nmosHostAddress) +
                    "\",\"api\":{\"versions\":[\"v1.3\"],\"endpoints\":[{\"host\":\"" + escape(config_.nmosHostAddress) + "\",\"port\":" +
-                   std::to_string(config_.nmosPort) + ",\"protocol\":\"http\"}]},\"caps\":{},\"services\":[],\"clocks\":[{\"name\":\"clk0\",\"ref_type\":\"internal\"}],\"tags\":" +
+                   std::to_string(config_.nmosPort) + ",\"protocol\":\"http\"}]},\"caps\":{},\"services\":[],\"clocks\":[{\"name\":\"clk0\",\"ref_type\":\"internal\"}],\"interfaces\":[],\"tags\":" +
                    tags + "}}";
             std::string senders = "[";
             std::string receivers = "[";
@@ -625,7 +625,7 @@ void NmosNode::handle(HttpRequest const& req, HttpResponse& res)
         text("{\"id\":\"" + nodeId_ + "\",\"version\":\"" + v + "\",\"label\":\"" + escape(config_.nmosLabel) +
              "\",\"description\":\"MXL Color Corrector\",\"hostname\":\"" + escape(config_.nmosHostAddress) + "\",\"href\":\"" + base +
              "/x-nmos/node/v1.3/self\",\"api\":{\"versions\":[\"v1.3\"],\"endpoints\":[{\"host\":\"" + escape(config_.nmosHostAddress) + "\",\"port\":" +
-             std::to_string(config_.nmosPort) + ",\"protocol\":\"http\"}]},\"caps\":{},\"services\":[],\"clocks\":[{\"name\":\"clk0\",\"ref_type\":\"internal\"}],\"tags\":" +
+             std::to_string(config_.nmosPort) + ",\"protocol\":\"http\"}]},\"caps\":{},\"services\":[],\"clocks\":[{\"name\":\"clk0\",\"ref_type\":\"internal\"}],\"interfaces\":[],\"tags\":" +
              tagsJson() + "}");
         return;
     }
