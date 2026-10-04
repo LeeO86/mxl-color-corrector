@@ -1,5 +1,22 @@
 # Performance
 
+## 1.0.1: the whole v210 path in AVX2
+
+`mxl-cc-bench` on one GitHub Actions runner (ubuntu-24.04, AVX2), this version and 1.0.0 built and run in the same CI job (`ci.yml`, step "bench"). One core, no other load.
+
+| Format | Path | 1.0.0 | 1.0.1 | Channels / core (1.0.1) |
+| --- | --- | --- | --- | --- |
+| 1080p50 | matrix | 14.2 ms/frame | 0.70 ms/frame | 28.8 |
+| 1080p50 | RGB gamut clip | 52.6 ms/frame | 11.8 ms/frame | 1.7 |
+| 2160p50 | matrix | 57.0 ms/frame | 2.7 ms/frame | 7.3 |
+| 2160p50 | RGB gamut clip | 211 ms/frame | 47.1 ms/frame | 0.42 |
+
+1.0.0 vectorised only the 3×4 dot product of one 6-pixel group; unpacking, clamping and packing were scalar. 1.0.1 takes eight groups (48 pixels) at a time: the 32 words are transposed so that each register holds one word position of the eight groups, every sample is then a shift and a mask, the matrix runs in 32-bit fixed point with the same rounding, the clamps are min/max, and the inverse transpose packs the result. RGB gamut clip does the scalar double-precision conversion on four lanes with the same operations in the same order and rounds like `llround`. Both are bit-exact with the scalar reference, clip statistics included (unit tests on 6 to 1920 pixel wide rasters, all clip modes). A matrix whose sums could leave 32 bits (far outside the control ranges) and the groups after the last block of a line keep the per-group code.
+
+A 1080p50 channel now needs well under a tenth of a core for the correction, also with RGB gamut clip on less than a core. 2160p50 with RGB gamut clip still needs about two and a half cores, which one channel thread cannot give (rows are not split across threads).
+
+## 1.0.0
+
 Measured with `mxl-cc-bench` on the build host (4-core Intel Xeon, AVX2). The bench applies a non-neutral matrix to packed v210. Channels per core is `1 / (seconds_per_frame × frame rate)`. RGB gamut clip stays on the scalar path because it converts every pixel through R′G′B′; the matrix path uses AVX2.
 
 | Format | Matrix | Channels / core | RGB gamut clip | Channels / core |
@@ -9,7 +26,7 @@ Measured with `mxl-cc-bench` on the build host (4-core Intel Xeon, AVX2). The be
 
 A 1080p50 channel with the matrix path fits in one frame on one core. 2160p50 needs about three cores per channel for the matrix path, and about eight when RGB gamut clip is on. These figures are not from a Dell Precision 3930; treat them as a starting point for the Kubernetes CPU request (one core per 1080p50 channel, three per 2160p50 channel, roughly triple that with RGB clip).
 
-## Lab run 2026-10-03: Xeon Gold 6136, image 1.0.0
+### Lab run 2026-10-03: Xeon Gold 6136, image 1.0.0
 
 A deployed corrector (not `mxl-cc-bench`) on a 2× Xeon Gold 6136 host (Skylake-SP, 3.0 GHz, AVX2 and AVX-512). Inputs were 1080p50 v210 flows (mxl-test-player bars, `mxl-mv-writer` solids) routed by IS-05; controls gain 1.1, saturation 1.2, pedestal 0.01, `CC_CLIP=legal`. The channels ran in whole-grain mode (`fallback_reason: no_slice_commits`). 15 s warm-up, 30 s measured.
 
