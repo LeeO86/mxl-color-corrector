@@ -83,6 +83,7 @@ private:
     void persistRoutesUnlocked() const;
     [[nodiscard]] std::string origin() const;
     [[nodiscard]] std::string deviceLabel() const;
+    [[nodiscard]] std::string controlsJson() const;
     [[nodiscard]] std::string tagsJson() const;
 
     Config config_;

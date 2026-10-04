@@ -20,6 +20,7 @@ DOMAIN_ID = "66666666-6666-4666-8666-666666666666"
 
 class Registry(BaseHTTPRequestHandler):
     nodes = {}
+    devices = {}
 
     def _read(self):
         n = int(self.headers.get("Content-Length", "0") or 0)
@@ -41,6 +42,8 @@ class Registry(BaseHTTPRequestHandler):
                 doc = {}
             if doc.get("type") == "node":
                 Registry.nodes[doc["data"]["id"]] = doc["data"]
+            if doc.get("type") == "device":
+                Registry.devices[doc["data"]["id"]] = doc["data"]
             self._send(201, b'{"ok":true}')
             return
         if "/health/nodes/" in self.path:
@@ -128,6 +131,11 @@ def main():
         if not Registry.nodes:
             raise SystemExit("node was not registered")
         node_id = next(iter(Registry.nodes))
+        # A controller finds the IS-05 API through the device's control.
+        controls = [d.get("controls") for d in Registry.devices.values()]
+        want = [{"href": f"http://10.255.0.1:{NMOS}/x-nmos/connection/v1.1/", "type": "urn:x-nmos:control:sr-ctrl/v1.1"}]
+        if controls != [want]:
+            raise SystemExit(f"device controls {controls}, expected {want}")
         proc.send_signal(signal.SIGTERM)
         code = proc.wait(timeout=15)
         if code != 143:
