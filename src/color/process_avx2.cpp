@@ -111,10 +111,12 @@ void processGroupDot8(std::uint8_t const* src, std::uint8_t* dst, int g, int wid
         int yy = clampTo(oY[i], matrix.yMin, matrix.yMax, clipped);
         yy = std::max(0, std::min(1023, yy));
         oy[i] = static_cast<std::uint16_t>(yy);
+        // Every sample's chroma counts for the statistics (as in the scalar
+        // reference); only the co-sited (even) one is written.
+        int cc = clampTo(oC[i], matrix.cMin, matrix.cMax, clipped);
+        int rr = clampTo(oR[i], matrix.cMin, matrix.cMax, clipped);
         if ((i % 2) == 0)
         {
-            int cc = clampTo(oC[i], matrix.cMin, matrix.cMax, clipped);
-            int rr = clampTo(oR[i], matrix.cMin, matrix.cMax, clipped);
             cc = std::max(0, std::min(1023, cc));
             rr = std::max(0, std::min(1023, rr));
             oc[i / 2] = static_cast<std::uint16_t>(cc);
@@ -245,10 +247,21 @@ void processBlock(std::uint8_t const* src, std::uint8_t* dst, Lanes const& k, Pr
     }
     if (stats)
     {
+        // As the scalar reference: a pixel counts when its Y or its own chroma
+        // (computed with its Y, also for the odd samples whose chroma is not
+        // written) leaves the clip limits.
         int clipped = 0;
         for (int i = 0; i < 6; ++i)
         {
-            clipped += countLanes((i % 2) == 0 ? _mm256_or_si256(clipY[i], clipC[i / 2]) : clipY[i]);
+            __m256i flags = _mm256_or_si256(clipY[i], clipC[i / 2]);
+            if ((i % 2) != 0)
+            {
+                __m256i clipCb, clipCr;
+                clampRow(k, 1, applyRow(k, 1, y[i], cb[i / 2], cr[i / 2]), clipCb);
+                clampRow(k, 2, applyRow(k, 2, y[i], cb[i / 2], cr[i / 2]), clipCr);
+                flags = _mm256_or_si256(clipY[i], _mm256_or_si256(clipCb, clipCr));
+            }
+            clipped += countLanes(flags);
         }
         stats->samples += 96;
         stats->clipped += static_cast<std::uint64_t>(clipped);
