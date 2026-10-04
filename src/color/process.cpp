@@ -325,7 +325,7 @@ bool cpuHasAvx2()
 void processV210(std::uint8_t const* src, std::uint8_t* dst, int width, int height, int srcStride, int dstStride, int rowBegin, int rowEnd,
     FixedMatrix const& matrix, ProcessStats* stats)
 {
-    if (!matrix.rgbClip && !matrix.bypass && cpuHasAvx2())
+    if (!matrix.bypass && cpuHasAvx2())
     {
         processV210Avx2(src, dst, width, height, srcStride, dstStride, rowBegin, rowEnd, matrix, stats);
         return;

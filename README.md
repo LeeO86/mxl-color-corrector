@@ -84,7 +84,7 @@ Import restores channels, presets and IS-05 routes. The `settings` object in an 
 
 ## Platform
 
-The image is `ghcr.io/leeo86/mxl-color-corrector:1.0.0`, uid 1000, pod network, MXL root hostPath `/Volumes/mxl`, writable `/config`. `deploy/k8s/deployment.yaml` sets `NMOS_HOST_ADDRESS` from `status.podIP`, `MXL_CLEANUP_ON_EXIT=true`, and `terminationGracePeriodSeconds: 20`. `production-down` should SIGTERM and then see the node and this instance's domain disappear.
+The image is `ghcr.io/leeo86/mxl-color-corrector:1.0.1`, uid 1000, pod network, MXL root hostPath `/Volumes/mxl`, writable `/config`. `deploy/k8s/deployment.yaml` sets `NMOS_HOST_ADDRESS` from `status.podIP`, `MXL_CLEANUP_ON_EXIT=true`, and `terminationGracePeriodSeconds: 20`. `production-down` should SIGTERM and then see the node and this instance's domain disappear.
 
 ## Controls
 

@@ -41,7 +41,7 @@ void processV210Avx2(std::uint8_t const* src, std::uint8_t* dst, int width, int 
 
 [[nodiscard]] bool cpuHasAvx2();
 
-// Dispatches to AVX2 when the CPU supports it and RGB gamut clip is off.
+// Dispatches to AVX2 when the CPU supports it (bit-exact with the scalar path).
 void processV210(std::uint8_t const* src, std::uint8_t* dst, int width, int height, int srcStride, int dstStride, int rowBegin, int rowEnd,
     FixedMatrix const& matrix, ProcessStats* stats);
 
