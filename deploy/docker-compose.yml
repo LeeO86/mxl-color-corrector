@@ -10,7 +10,7 @@ services:
       - ../tests/integration/fake_registry.py:/registry.py:ro
 
   pattern:
-    image: ghcr.io/leeo86/mxl-color-corrector:1.0.2
+    image: ghcr.io/leeo86/mxl-color-corrector:1.0.3
     network_mode: host
     user: "1000:1000"
     entrypoint: ["/usr/local/bin/mxl-cc-pattern"]
@@ -31,7 +31,7 @@ services:
       - mxl:/Volumes/mxl
 
   corrector:
-    image: ghcr.io/leeo86/mxl-color-corrector:1.0.2
+    image: ghcr.io/leeo86/mxl-color-corrector:1.0.3
     network_mode: host
     user: "1000:1000"
     depends_on:

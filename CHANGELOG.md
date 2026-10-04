@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.3
+
+- The NMOS node lists `interfaces` (empty), which the IS-04 v1.3 node schema requires. An nmos-cpp registry rejected the node ("schema validation failed"), then the device, source, flow, sender and receiver ("unknown parent"), so `/readyz` never turned 200 against a real registry and nothing could be connected. Found on the lab host with the platform's registry; the integration test's registry stand-in did not validate. With the field, all resources register.
+
 ## 1.0.2
 
 - The NMOS device lists its IS-05 control (`urn:x-nmos:control:sr-ctrl/v1.1`, href `http://NMOS_HOST_ADDRESS:NMOS_PORT/x-nmos/connection/v1.1/`). It registered `"controls": []`, so a controller that finds the Connection API through the device (the platform's production-up and production-down, nmos-crosspoint) could not connect or disable the receivers.

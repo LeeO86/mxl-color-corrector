@@ -131,6 +131,11 @@ def main():
         if not Registry.nodes:
             raise SystemExit("node was not registered")
         node_id = next(iter(Registry.nodes))
+        # IS-04 v1.3 node schema: nmos-cpp registries reject a node without any of these.
+        required = {"id", "version", "label", "description", "tags", "href", "api", "services", "caps", "clocks", "interfaces"}
+        missing = required - set(Registry.nodes[node_id])
+        if missing:
+            raise SystemExit(f"node lacks required IS-04 fields: {sorted(missing)}")
         # A controller finds the IS-05 API through the device's control.
         controls = [d.get("controls") for d in Registry.devices.values()]
         want = [{"href": f"http://10.255.0.1:{NMOS}/x-nmos/connection/v1.1/", "type": "urn:x-nmos:control:sr-ctrl/v1.1"}]
