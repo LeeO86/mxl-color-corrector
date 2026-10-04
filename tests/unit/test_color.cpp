@@ -44,7 +44,118 @@ void fillLegal(std::vector<std::uint8_t>& frame, int width, int height, std::uin
     }
 }
 
+// Every 10-bit code, so the clip limits are hit often.
+void fillAny(std::vector<std::uint8_t>& frame, int width, int height, std::uint32_t seed)
+{
+    int const stride = v210Stride(width);
+    frame.assign(static_cast<std::size_t>(stride * height), 0);
+    std::vector<std::uint16_t> y(static_cast<std::size_t>(width));
+    std::vector<std::uint16_t> cb(static_cast<std::size_t>(width / 2 + 1));
+    std::vector<std::uint16_t> cr(static_cast<std::size_t>(width / 2 + 1));
+    for (int row = 0; row < height; ++row)
+    {
+        for (auto& v : y)
+        {
+            v = static_cast<std::uint16_t>(lcg(seed) % 1024);
+        }
+        for (std::size_t x = 0; x < cb.size(); ++x)
+        {
+            cb[x] = static_cast<std::uint16_t>(lcg(seed) % 1024);
+            cr[x] = static_cast<std::uint16_t>(lcg(seed) % 1024);
+        }
+        packV210Line(frame.data() + static_cast<std::size_t>(row * stride), width, stride, y.data(), cb.data(), cr.data());
+    }
+}
+
+// The AVX2 path against the scalar reference: output bytes and statistics.
+void checkAvx2MatchesScalar(FixedMatrix const& matrix, int width, int height, std::uint32_t seed)
+{
+    std::vector<std::uint8_t> src;
+    fillAny(src, width, height, seed);
+    std::vector<std::uint8_t> a(src.size(), 0xAA), b(src.size(), 0x55);
+    ProcessStats sa, sb;
+    processV210Scalar(src.data(), a.data(), width, height, 0, 0, 0, height, matrix, &sa);
+    processV210Avx2(src.data(), b.data(), width, height, 0, 0, 0, height, matrix, &sb);
+    CHECK(std::memcmp(a.data(), b.data(), a.size()) == 0);
+    CHECK(sa.samples == sb.samples);
+    CHECK(sa.clipped == sb.clipped);
+}
+
 } // namespace
+
+TEST_CASE("avx2 blocks match the scalar reference on every raster and clip mode")
+{
+    if (!cpuHasAvx2())
+    {
+        return;
+    }
+    Controls strong;
+    strong.gain = 180;
+    strong.saturation = 190;
+    strong.pedestal = 6;
+    strong.white = {12, -8, 4};
+    strong.clip = ClipMode::Legal;
+    Controls dark;
+    dark.gain = 60;
+    dark.brightness = -15;
+    dark.black = {-3, 2, 1};
+    dark.clip = ClipMode::Extended;
+    Controls open;
+    open.gain = 120;
+    open.saturation = 40;
+    open.whiteWheelX = 0.4;
+    open.blackWheelY = -0.3;
+    open.clip = ClipMode::Off;
+    std::uint32_t seed = 7;
+    for (Controls const& controls : {strong, dark, open})
+    {
+        auto const matrix = buildMatrix(controls);
+        REQUIRE_FALSE(matrix.identity);
+        // 6 and 54: no block or one block plus a group; 1280 ends in a partial group.
+        for (int width : {6, 54, 96, 1280, 1920})
+        {
+            checkAvx2MatchesScalar(matrix, width, 4, ++seed);
+        }
+    }
+}
+
+TEST_CASE("avx2 row slices match the whole frame")
+{
+    if (!cpuHasAvx2())
+    {
+        return;
+    }
+    Controls controls;
+    controls.gain = 150;
+    controls.saturation = 130;
+    auto const matrix = buildMatrix(controls);
+    int const width = 1920;
+    int const height = 9;
+    std::vector<std::uint8_t> src;
+    fillAny(src, width, height, 3);
+    std::vector<std::uint8_t> whole(src.size()), sliced(src.size());
+    processV210Avx2(src.data(), whole.data(), width, height, 0, 0, 0, height, matrix, nullptr);
+    for (int row = 0; row < height; row += 4)
+    {
+        processV210Avx2(src.data(), sliced.data(), width, height, 0, 0, row, std::min(row + 4, height), matrix, nullptr);
+    }
+    CHECK(std::memcmp(whole.data(), sliced.data(), whole.size()) == 0);
+}
+
+TEST_CASE("avx2 stays exact for a matrix beyond 32-bit sums")
+{
+    if (!cpuHasAvx2())
+    {
+        return;
+    }
+    Controls controls;
+    controls.gain = 150;
+    auto matrix = buildMatrix(controls);
+    matrix.m[0][0] = 3'000'000; // 3e6 * 1023 does not fit an int32 lane
+    matrix.m[1][2] = -2'500'000;
+    matrix.identity = false;
+    checkAvx2MatchesScalar(matrix, 1920, 2, 11);
+}
 
 TEST_CASE("v210 roundtrip is bit-exact")
 {
