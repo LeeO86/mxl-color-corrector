@@ -1,5 +1,7 @@
 #include "color/process.hpp"
 
+#include "color/bt709.hpp"
+
 #include "v210.hpp"
 
 #include <algorithm>
@@ -281,6 +283,173 @@ void processBlock(std::uint8_t const* src, std::uint8_t* dst, Lanes const& k, Pr
     _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst + 96), w3);
 }
 
+// One group exactly as the scalar reference (correctSample per pixel): the tail
+// of a line and matrices beyond 32-bit sums when RGB gamut clip is on.
+void processGroupScalar(std::uint8_t const* src, std::uint8_t* dst, int g, int width, FixedMatrix const& matrix, ProcessStats* stats)
+{
+    std::uint32_t words[4] = {};
+    std::memcpy(words, src + static_cast<std::size_t>(g) * 16u, sizeof(words));
+    std::uint16_t ys[6], cbs[3], crs[3];
+    unpackV210Group(words, ys, cbs, crs);
+    std::uint16_t oy[6] = {};
+    std::uint16_t oc[3] = {};
+    std::uint16_t orr[3] = {};
+    int x = g * 6;
+    for (int i = 0; i < 6 && x < width; ++i, ++x)
+    {
+        bool clipped = false;
+        int outY = 0, outCb = 0, outCr = 0;
+        correctSample(matrix, ys[i], cbs[i / 2], crs[i / 2], outY, outCb, outCr, clipped);
+        oy[i] = static_cast<std::uint16_t>(outY);
+        if ((i % 2) == 0)
+        {
+            oc[i / 2] = static_cast<std::uint16_t>(outCb);
+            orr[i / 2] = static_cast<std::uint16_t>(outCr);
+        }
+        if (stats)
+        {
+            stats->samples += 2;
+            if (clipped)
+            {
+                stats->clipped += 1;
+            }
+        }
+    }
+    std::uint32_t outWords[4];
+    packV210Group(outWords, oy, oc, orr);
+    std::memcpy(dst + static_cast<std::size_t>(g) * 16u, outWords, sizeof(outWords));
+}
+
+// llround (halves away from zero), exactly: round to nearest even, then move the
+// exact ties that went towards zero.
+__m256d roundAway(__m256d x)
+{
+    __m256d const r = _mm256_round_pd(x, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+    __m256d const d = _mm256_sub_pd(x, r);
+    __m256d const zero = _mm256_setzero_pd();
+    __m256d const one = _mm256_set1_pd(1.0);
+    __m256d const up = _mm256_and_pd(_mm256_and_pd(_mm256_cmp_pd(d, _mm256_set1_pd(0.5), _CMP_EQ_OQ), _mm256_cmp_pd(x, zero, _CMP_GT_OQ)), one);
+    __m256d const down = _mm256_and_pd(_mm256_and_pd(_mm256_cmp_pd(d, _mm256_set1_pd(-0.5), _CMP_EQ_OQ), _mm256_cmp_pd(x, zero, _CMP_LT_OQ)), one);
+    return _mm256_sub_pd(_mm256_add_pd(r, up), down);
+}
+
+// std::clamp(v, 0.0, 1.0).
+__m256d clamp01(__m256d v)
+{
+    __m256d const lo = _mm256_setzero_pd();
+    __m256d const hi = _mm256_set1_pd(1.0);
+    __m256d const r = _mm256_blendv_pd(v, hi, _mm256_cmp_pd(hi, v, _CMP_LT_OQ));
+    return _mm256_blendv_pd(r, lo, _mm256_cmp_pd(v, lo, _CMP_LT_OQ));
+}
+
+// rgbClipCodes in process.cpp for four samples, with the same operations in the
+// same order (double precision, no FMA), so the codes are identical. Returns the
+// lanes that were pulled back into the RGB cube.
+__m256d rgbClip4(__m256d& Y, __m256d& Cb, __m256d& Cr)
+{
+    using namespace bt709;
+    auto c = [](double v) { return _mm256_set1_pd(v); };
+    __m256d const y = _mm256_div_pd(_mm256_sub_pd(Y, c(kYBlack)), c(kYSpan));
+    __m256d const cb = _mm256_div_pd(_mm256_sub_pd(Cb, c(kCZero)), c(kCSpan));
+    __m256d const cr = _mm256_div_pd(_mm256_sub_pd(Cr, c(kCZero)), c(kCSpan));
+    __m256d const R = _mm256_add_pd(y, _mm256_mul_pd(c(kCrScale), cr));
+    __m256d const G = _mm256_sub_pd(_mm256_sub_pd(y, _mm256_mul_pd(c(kCbToG), cb)), _mm256_mul_pd(c(kCrToG), cr));
+    __m256d const B = _mm256_add_pd(y, _mm256_mul_pd(c(kCbScale), cb));
+    constexpr double kEps = 1e-6;
+    __m256d const lo = c(-kEps);
+    __m256d const hi = c(1.0 + kEps);
+    __m256d outside = _mm256_or_pd(_mm256_cmp_pd(R, lo, _CMP_LT_OQ), _mm256_cmp_pd(R, hi, _CMP_GT_OQ));
+    outside = _mm256_or_pd(outside, _mm256_or_pd(_mm256_cmp_pd(G, lo, _CMP_LT_OQ), _mm256_cmp_pd(G, hi, _CMP_GT_OQ)));
+    outside = _mm256_or_pd(outside, _mm256_or_pd(_mm256_cmp_pd(B, lo, _CMP_LT_OQ), _mm256_cmp_pd(B, hi, _CMP_GT_OQ)));
+    if (_mm256_movemask_pd(outside) == 0)
+    {
+        return outside;
+    }
+    __m256d const Rc = clamp01(R);
+    __m256d const Gc = clamp01(G);
+    __m256d const Bc = clamp01(B);
+    __m256d const yn = _mm256_add_pd(_mm256_add_pd(_mm256_mul_pd(c(kKr), Rc), _mm256_mul_pd(c(kKg), Gc)), _mm256_mul_pd(c(kKb), Bc));
+    __m256d const cbn = _mm256_div_pd(_mm256_sub_pd(Bc, yn), c(kCbScale));
+    __m256d const crn = _mm256_div_pd(_mm256_sub_pd(Rc, yn), c(kCrScale));
+    Y = _mm256_blendv_pd(Y, roundAway(_mm256_add_pd(_mm256_mul_pd(yn, c(kYSpan)), c(kYBlack))), outside);
+    Cb = _mm256_blendv_pd(Cb, roundAway(_mm256_add_pd(_mm256_mul_pd(cbn, c(kCSpan)), c(kCZero))), outside);
+    Cr = _mm256_blendv_pd(Cr, roundAway(_mm256_add_pd(_mm256_mul_pd(crn, c(kCSpan)), c(kCZero))), outside);
+    return outside;
+}
+
+// RGB gamut clip on eight lanes of codes; returns the pulled lanes as a mask.
+__m256i rgbClip8(__m256i& Y, __m256i& Cb, __m256i& Cr)
+{
+    __m128i outY[2], outCb[2], outCr[2];
+    int bits = 0;
+    for (int h = 0; h < 2; ++h)
+    {
+        auto half = [h](__m256i v) { return h == 0 ? _mm256_castsi256_si128(v) : _mm256_extracti128_si256(v, 1); };
+        __m256d dy = _mm256_cvtepi32_pd(half(Y));
+        __m256d dcb = _mm256_cvtepi32_pd(half(Cb));
+        __m256d dcr = _mm256_cvtepi32_pd(half(Cr));
+        bits |= _mm256_movemask_pd(rgbClip4(dy, dcb, dcr)) << (4 * h);
+        outY[h] = _mm256_cvtpd_epi32(dy);
+        outCb[h] = _mm256_cvtpd_epi32(dcb);
+        outCr[h] = _mm256_cvtpd_epi32(dcr);
+    }
+    Y = _mm256_set_m128i(outY[1], outY[0]);
+    Cb = _mm256_set_m128i(outCb[1], outCb[0]);
+    Cr = _mm256_set_m128i(outCr[1], outCr[0]);
+    __m256i const laneBit = _mm256_setr_epi32(1, 2, 4, 8, 16, 32, 64, 128);
+    return _mm256_cmpeq_epi32(_mm256_and_si256(_mm256_set1_epi32(bits), laneBit), laneBit);
+}
+
+// The block with RGB gamut clip: every pixel gets all three rows (with its own
+// Y), the clip, then the clamps; chroma is written from the even samples.
+void processBlockRgb(std::uint8_t const* src, std::uint8_t* dst, Lanes const& k, ProcessStats* stats)
+{
+    __m256i w0 = _mm256_loadu_si256(reinterpret_cast<__m256i const*>(src));
+    __m256i w1 = _mm256_loadu_si256(reinterpret_cast<__m256i const*>(src + 32));
+    __m256i w2 = _mm256_loadu_si256(reinterpret_cast<__m256i const*>(src + 64));
+    __m256i w3 = _mm256_loadu_si256(reinterpret_cast<__m256i const*>(src + 96));
+    transpose(w0, w1, w2, w3);
+    auto field = [&](__m256i w, int shift) { return _mm256_and_si256(_mm256_srli_epi32(w, shift), k.mask); };
+    __m256i const y[6] = {field(w0, 10), field(w1, 0), field(w1, 20), field(w2, 10), field(w3, 0), field(w3, 20)};
+    __m256i const cb[3] = {field(w0, 0), field(w1, 10), field(w2, 20)};
+    __m256i const cr[3] = {field(w0, 20), field(w2, 0), field(w3, 10)};
+
+    __m256i oy[6], oc[6], orr[6];
+    int clipped = 0;
+    for (int i = 0; i < 6; ++i)
+    {
+        __m256i outY = applyRow(k, 0, y[i], cb[i / 2], cr[i / 2]);
+        __m256i outCb = applyRow(k, 1, y[i], cb[i / 2], cr[i / 2]);
+        __m256i outCr = applyRow(k, 2, y[i], cb[i / 2], cr[i / 2]);
+        __m256i const pulled = rgbClip8(outY, outCb, outCr);
+        __m256i clipY, clipCb, clipCr;
+        oy[i] = clampRow(k, 0, outY, clipY);
+        oc[i] = clampRow(k, 1, outCb, clipCb);
+        orr[i] = clampRow(k, 2, outCr, clipCr);
+        if (stats)
+        {
+            clipped += countLanes(_mm256_or_si256(_mm256_or_si256(pulled, clipY), _mm256_or_si256(clipCb, clipCr)));
+        }
+    }
+    if (stats)
+    {
+        stats->samples += 96;
+        stats->clipped += static_cast<std::uint64_t>(clipped);
+    }
+    auto word = [](__m256i a, __m256i b, __m256i c) {
+        return _mm256_or_si256(_mm256_or_si256(a, _mm256_slli_epi32(b, 10)), _mm256_slli_epi32(c, 20));
+    };
+    w0 = word(oc[0], oy[0], orr[0]);
+    w1 = word(oy[1], oc[2], oy[2]);
+    w2 = word(orr[2], oy[3], oc[4]);
+    w3 = word(oy[4], orr[4], oy[5]);
+    transpose(w0, w1, w2, w3);
+    _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst), w0);
+    _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst + 32), w1);
+    _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst + 64), w2);
+    _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst + 96), w3);
+}
+
 void processLineAvx2(std::uint8_t const* src, std::uint8_t* dst, int width, int stride, FixedMatrix const& matrix, Lanes const& lanes, bool wide,
     ProcessStats* stats)
 {
@@ -294,11 +463,26 @@ void processLineAvx2(std::uint8_t const* src, std::uint8_t* dst, int width, int 
     int const blocks = wide ? (width / 6) / 8 : 0;
     for (int b = 0; b < blocks; ++b)
     {
-        processBlock(src + static_cast<std::size_t>(b) * 128u, dst + static_cast<std::size_t>(b) * 128u, lanes, stats);
+        std::size_t const offset = static_cast<std::size_t>(b) * 128u;
+        if (matrix.rgbClip)
+        {
+            processBlockRgb(src + offset, dst + offset, lanes, stats);
+        }
+        else
+        {
+            processBlock(src + offset, dst + offset, lanes, stats);
+        }
     }
     for (int g = blocks * 8; g < groups; ++g)
     {
-        processGroupDot8(src, dst, g, width, matrix, stats);
+        if (matrix.rgbClip)
+        {
+            processGroupScalar(src, dst, g, width, matrix, stats);
+        }
+        else
+        {
+            processGroupDot8(src, dst, g, width, matrix, stats);
+        }
     }
     std::size_t const written = static_cast<std::size_t>(groups) * 16u;
     if (static_cast<std::size_t>(stride) > written)

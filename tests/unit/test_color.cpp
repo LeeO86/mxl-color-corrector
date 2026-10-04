@@ -106,8 +106,12 @@ TEST_CASE("avx2 blocks match the scalar reference on every raster and clip mode"
     open.whiteWheelX = 0.4;
     open.blackWheelY = -0.3;
     open.clip = ClipMode::Off;
+    Controls gamut = strong;
+    gamut.rgbClip = true;
+    Controls gamutOff = open;
+    gamutOff.rgbClip = true;
     std::uint32_t seed = 7;
-    for (Controls const& controls : {strong, dark, open})
+    for (Controls const& controls : {strong, dark, open, gamut, gamutOff})
     {
         auto const matrix = buildMatrix(controls);
         REQUIRE_FALSE(matrix.identity);
@@ -155,6 +159,8 @@ TEST_CASE("avx2 stays exact for a matrix beyond 32-bit sums")
     matrix.m[1][2] = -2'500'000;
     matrix.identity = false;
     checkAvx2MatchesScalar(matrix, 1920, 2, 11);
+    matrix.rgbClip = true;
+    checkAvx2MatchesScalar(matrix, 1920, 2, 12);
 }
 
 TEST_CASE("v210 roundtrip is bit-exact")
