@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.0.1
 
 - The whole v210 path runs in AVX2: eight 6-pixel groups at a time through a transposed block (unpack, 32-bit fixed-point matrix, clamp, pack). A 1080p50 frame takes 0.7 ms instead of 14 ms on a CI runner; on the lab's Xeon Gold 6136, 1.0.0 needed 27 ms and missed real time. Bit-exact with the scalar reference ([docs/performance.md](docs/performance.md)).
 - RGB gamut clip runs in AVX2 as well (double precision, same operations and rounding as the scalar path): 11.8 ms instead of 52.6 ms per 1080p50 frame, so it keeps real time on one core.
