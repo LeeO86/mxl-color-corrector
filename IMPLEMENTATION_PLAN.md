@@ -31,7 +31,7 @@ Pinned MXL: `dmf-mxl/mxl` `release/v1.1` at `218ddaa0a08c12ffe75fc475ae65aa3d9ee
 
 * **Co-siting.** v210 chroma belongs to the even luma sample. Odd luma uses that same pair. Output chroma is the even sample's result. A neutral matrix with legal samples is a byte copy, including line padding.
 
-* **Matrix.** The RGB affine correction and the saturation scale are folded with the BT.709 matrices into one 3×4 fixed-point matrix (1/65536). Neutral controls force an exact identity. RGB gamut clip is a separate per-pixel step and does not round-trip samples that are already inside 0…1. `clip=off` still limits codes to the 10-bit container, 0–1023. Extended clip is 4–1019.
+* **Matrix.** The RGB affine correction and the saturation scale are folded with the BT.709 matrices into one 3×4 fixed-point matrix (1/65536). Neutral controls force an exact identity. RGB gamut clip is a separate per-pixel step and does not round-trip samples that are already inside 0…1. Its conversions multiply by reciprocals (no divisions); the AVX2 path first tests eight pixels in 32-bit fixed point and skips the exact double-precision test when all are clearly inside the cube (1.0.4, docs/performance.md). `clip=off` still limits codes to the 10-bit container, 0–1023. Extended clip is 4–1019.
 
 * **Read offset.** Slice mode follows the writer's head (offset 0). Whole-grain mode reads `CC_READ_OFFSET_GRAINS` behind the head, default 1, so the grain is complete. Fallback reasons are `interlaced`, `no_slice_commits` (four grains seen only as complete) and `slice_layout` (slice size is not an integer number of v210 lines that divide the frame). The change is logged once.
 
