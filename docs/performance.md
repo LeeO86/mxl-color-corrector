@@ -1,5 +1,16 @@
 # Performance
 
+## 1.0.4: RGB gamut clip
+
+A deployed corrector on the lab's 2× Xeon Gold 6136 (as in the 2026-10-03 run below): 4 channels, 1080p50 test-player bars with burn-in, gain 1.1, saturation 1.2, pedestal 0.01, 20 s measured. All grains on time in every case.
+
+| RGB gamut clip | 1.0.3 | divisions → multiplications | 1.0.4 (also the inside test) |
+| --- | --- | --- | --- |
+| off | 0.79 cores | 0.79 cores | 0.79 cores |
+| on | 1.89 cores | 1.66 cores | 1.33 cores |
+
+`perf` on 1.0.3 with gamut clip: the time spread over the double-precision R′G′B′ test of every pixel (four lanes per instruction), with `vdivpd` the most expensive part. 1.0.4 multiplies by reciprocals and first checks eight pixels at a time in 32-bit fixed point: when R′, G′ and B′ are at least 2⁻¹⁰ inside [0, 1] and the codes inside the legal ranges, the coefficients' rounding (at most 886 · 2⁻²⁰) cannot move them out, so the exact test is skipped. Colour bars lie on the cube's faces and mostly still take the exact test; camera pictures mostly do not.
+
 ## 1.0.1: the whole v210 path in AVX2
 
 `mxl-cc-bench` on one GitHub Actions runner (ubuntu-24.04, AVX2), this version and 1.0.0 built and run in the same CI job (`ci.yml`, step "bench"). One core, no other load.

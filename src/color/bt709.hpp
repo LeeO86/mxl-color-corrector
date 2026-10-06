@@ -19,12 +19,18 @@ inline constexpr double kYBlack = 64.0;
 inline constexpr double kYSpan = 876.0;
 inline constexpr double kCZero = 512.0;
 inline constexpr double kCSpan = 896.0;
+// Reciprocals: the conversions multiply instead of dividing (a vector division costs as much
+// as about 16 multiplications), and the AVX2 gamut clip repeats them operation for operation.
+inline constexpr double kInvYSpan = 1.0 / kYSpan;
+inline constexpr double kInvCSpan = 1.0 / kCSpan;
+inline constexpr double kInvCbScale = 1.0 / kCbScale;
+inline constexpr double kInvCrScale = 1.0 / kCrScale;
 
 inline void codeToN(double Y, double Cb, double Cr, double& y, double& cb, double& cr)
 {
-    y = (Y - kYBlack) / kYSpan;
-    cb = (Cb - kCZero) / kCSpan;
-    cr = (Cr - kCZero) / kCSpan;
+    y = (Y - kYBlack) * kInvYSpan;
+    cb = (Cb - kCZero) * kInvCSpan;
+    cr = (Cr - kCZero) * kInvCSpan;
 }
 
 inline void nToCode(double y, double cb, double cr, double& Y, double& Cb, double& Cr)
@@ -44,8 +50,8 @@ inline void nToRgb(double y, double cb, double cr, double& R, double& G, double&
 inline void rgbToN(double R, double G, double B, double& y, double& cb, double& cr)
 {
     y = kKr * R + kKg * G + kKb * B;
-    cb = (B - y) / kCbScale;
-    cr = (R - y) / kCrScale;
+    cb = (B - y) * kInvCbScale;
+    cr = (R - y) * kInvCrScale;
 }
 
 inline void codeToRgb(double Y, double Cb, double Cr, double& R, double& G, double& B)
