@@ -170,7 +170,8 @@ public:
         else
         {
             std::ofstream out(def);
-            out << "{\"id\":\"" << id << "\",\"label\":\"" << label << "\"}\n";
+            // BCP-007-03 requires id, label, description and tags.
+            out << "{\"id\":\"" << id << "\",\"label\":\"" << label << "\",\"description\":\"Output domain of mxl-color-corrector\",\"tags\":{}}\n";
         }
         auto options = std::filesystem::path(dir) / "options.json";
         if (!std::filesystem::exists(options))
