@@ -123,6 +123,54 @@ TEST_CASE("avx2 blocks match the scalar reference on every raster and clip mode"
     }
 }
 
+TEST_CASE("avx2 gamut clip matches the scalar reference on in-gamut pictures")
+{
+    if (!cpuHasAvx2())
+    {
+        return;
+    }
+    // Codes from RGB inside the cube (most blocks skip the exact test) and near its faces.
+    int const width = 1920;
+    int const height = 4;
+    int const stride = v210Stride(width);
+    std::uint32_t seed = 21;
+    for (double const lo : {0.05, 0.0})
+    {
+        std::vector<std::uint8_t> src(static_cast<std::size_t>(stride * height), 0);
+        std::vector<std::uint16_t> y(static_cast<std::size_t>(width));
+        std::vector<std::uint16_t> cb(static_cast<std::size_t>(width / 2));
+        std::vector<std::uint16_t> cr(static_cast<std::size_t>(width / 2));
+        for (int row = 0; row < height; ++row)
+        {
+            for (int x = 0; x < width; x += 2)
+            {
+                auto const unit = [&] { return lo + (1.0 - 2 * lo) * static_cast<double>(lcg(seed) % 10001) / 10000.0; };
+                double Y, Cb, Cr;
+                bt709::rgbToCode(unit(), unit(), unit(), Y, Cb, Cr);
+                y[static_cast<std::size_t>(x)] = static_cast<std::uint16_t>(std::lround(Y));
+                y[static_cast<std::size_t>(x + 1)] = static_cast<std::uint16_t>(std::lround(Y));
+                cb[static_cast<std::size_t>(x / 2)] = static_cast<std::uint16_t>(std::lround(Cb));
+                cr[static_cast<std::size_t>(x / 2)] = static_cast<std::uint16_t>(std::lround(Cr));
+            }
+            packV210Line(src.data() + static_cast<std::size_t>(row * stride), width, stride, y.data(), cb.data(), cr.data());
+        }
+        for (int const saturation : {100, 110})
+        {
+            Controls controls;
+            controls.rgbClip = true;
+            controls.saturation = saturation;
+            controls.gain = 101;
+            auto const matrix = buildMatrix(controls);
+            std::vector<std::uint8_t> a(src.size(), 0xAA), b(src.size(), 0x55);
+            ProcessStats sa, sb;
+            processV210Scalar(src.data(), a.data(), width, height, 0, 0, 0, height, matrix, &sa);
+            processV210Avx2(src.data(), b.data(), width, height, 0, 0, 0, height, matrix, &sb);
+            CHECK(std::memcmp(a.data(), b.data(), a.size()) == 0);
+            CHECK(sa.clipped == sb.clipped);
+        }
+    }
+}
+
 TEST_CASE("avx2 row slices match the whole frame")
 {
     if (!cpuHasAvx2())

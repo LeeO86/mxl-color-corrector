@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0.4
+
+RGB gamut clip takes less CPU; the matrix path and all settings are unchanged. Lab host (2× Xeon Gold 6136), 4 channels of 1080p50 test-player bars with gain 1.1, saturation 1.2, pedestal 0.01: 1.89 → 1.33 cores with RGB gamut clip on, 0.79 cores off (unchanged). Bars sit on the faces of the RGB cube, the worst case; pictures mostly inside the cube gain more.
+
+- Pixels clearly inside the RGB cube skip the exact double-precision test: a 32-bit fixed-point R′G′B′ estimate, with a margin larger than its rounding error, shows that the exact test would leave them alone. AVX2 only, eight pixels at a time; the result is the same.
+- The Y′CbCr ↔ R′G′B′ conversions multiply by reciprocals instead of dividing, in the scalar reference and the AVX2 path alike (a vector division costs about as much as 16 multiplications). Codes can differ from 1.0.3 by one where the double-precision result lay within a rounding step of .5; the AVX2 path stays bit-exact with the scalar reference.
+
 ## 1.0.3
 
 - The NMOS node lists `interfaces` (empty), which the IS-04 v1.3 node schema requires. An nmos-cpp registry rejected the node ("schema validation failed"), then the device, source, flow, sender and receiver ("unknown parent"), so `/readyz` never turned 200 against a real registry and nothing could be connected. Found on the lab host with the platform's registry; the integration test's registry stand-in did not validate. With the field, all resources register.

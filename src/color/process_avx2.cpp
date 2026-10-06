@@ -349,9 +349,9 @@ __m256d rgbClip4(__m256d& Y, __m256d& Cb, __m256d& Cr)
 {
     using namespace bt709;
     auto c = [](double v) { return _mm256_set1_pd(v); };
-    __m256d const y = _mm256_div_pd(_mm256_sub_pd(Y, c(kYBlack)), c(kYSpan));
-    __m256d const cb = _mm256_div_pd(_mm256_sub_pd(Cb, c(kCZero)), c(kCSpan));
-    __m256d const cr = _mm256_div_pd(_mm256_sub_pd(Cr, c(kCZero)), c(kCSpan));
+    __m256d const y = _mm256_mul_pd(_mm256_sub_pd(Y, c(kYBlack)), c(kInvYSpan));
+    __m256d const cb = _mm256_mul_pd(_mm256_sub_pd(Cb, c(kCZero)), c(kInvCSpan));
+    __m256d const cr = _mm256_mul_pd(_mm256_sub_pd(Cr, c(kCZero)), c(kInvCSpan));
     __m256d const R = _mm256_add_pd(y, _mm256_mul_pd(c(kCrScale), cr));
     __m256d const G = _mm256_sub_pd(_mm256_sub_pd(y, _mm256_mul_pd(c(kCbToG), cb)), _mm256_mul_pd(c(kCrToG), cr));
     __m256d const B = _mm256_add_pd(y, _mm256_mul_pd(c(kCbScale), cb));
@@ -369,12 +369,43 @@ __m256d rgbClip4(__m256d& Y, __m256d& Cb, __m256d& Cr)
     __m256d const Gc = clamp01(G);
     __m256d const Bc = clamp01(B);
     __m256d const yn = _mm256_add_pd(_mm256_add_pd(_mm256_mul_pd(c(kKr), Rc), _mm256_mul_pd(c(kKg), Gc)), _mm256_mul_pd(c(kKb), Bc));
-    __m256d const cbn = _mm256_div_pd(_mm256_sub_pd(Bc, yn), c(kCbScale));
-    __m256d const crn = _mm256_div_pd(_mm256_sub_pd(Rc, yn), c(kCrScale));
+    __m256d const cbn = _mm256_mul_pd(_mm256_sub_pd(Bc, yn), c(kInvCbScale));
+    __m256d const crn = _mm256_mul_pd(_mm256_sub_pd(Rc, yn), c(kInvCrScale));
     Y = _mm256_blendv_pd(Y, roundAway(_mm256_add_pd(_mm256_mul_pd(yn, c(kYSpan)), c(kYBlack))), outside);
     Cb = _mm256_blendv_pd(Cb, roundAway(_mm256_add_pd(_mm256_mul_pd(cbn, c(kCSpan)), c(kCZero))), outside);
     Cr = _mm256_blendv_pd(Cr, roundAway(_mm256_add_pd(_mm256_mul_pd(crn, c(kCSpan)), c(kCZero))), outside);
     return outside;
+}
+
+// True when all eight lanes are clearly inside the RGB cube, so rgbClip8 would leave them
+// alone: codes in the legal ranges, and R, G, B from 20-bit fixed-point coefficients at least
+// 2^-10 inside [0, 1]. Within those ranges the coefficients' rounding moves R, G and B by at
+// most 0.5 · (876 + 448 + 448) · 2^-20, less than the margin.
+bool clearlyInside(__m256i Y, __m256i Cb, __m256i Cr)
+{
+    using namespace bt709;
+    constexpr double kOne = 1 << 20;
+    constexpr int kY = static_cast<int>(kOne / kYSpan + 0.5);
+    constexpr int kRcr = static_cast<int>(kOne * kCrScale / kCSpan + 0.5);
+    constexpr int kGcb = static_cast<int>(kOne * kCbToG / kCSpan + 0.5);
+    constexpr int kGcr = static_cast<int>(kOne * kCrToG / kCSpan + 0.5);
+    constexpr int kBcb = static_cast<int>(kOne * kCbScale / kCSpan + 0.5);
+    constexpr int kMargin = 1 << 10;
+    auto const outside = [](__m256i v, int lo, int hi) {
+        return _mm256_or_si256(_mm256_cmpgt_epi32(_mm256_set1_epi32(lo), v), _mm256_cmpgt_epi32(v, _mm256_set1_epi32(hi)));
+    };
+    __m256i const y = _mm256_sub_epi32(Y, _mm256_set1_epi32(64));
+    __m256i const cb = _mm256_sub_epi32(Cb, _mm256_set1_epi32(512));
+    __m256i const cr = _mm256_sub_epi32(Cr, _mm256_set1_epi32(512));
+    __m256i const ly = _mm256_mullo_epi32(y, _mm256_set1_epi32(kY));
+    __m256i const r = _mm256_add_epi32(ly, _mm256_mullo_epi32(cr, _mm256_set1_epi32(kRcr)));
+    __m256i const g = _mm256_sub_epi32(_mm256_sub_epi32(ly, _mm256_mullo_epi32(cb, _mm256_set1_epi32(kGcb))), _mm256_mullo_epi32(cr, _mm256_set1_epi32(kGcr)));
+    __m256i const b = _mm256_add_epi32(ly, _mm256_mullo_epi32(cb, _mm256_set1_epi32(kBcb)));
+    __m256i bad = _mm256_or_si256(outside(y, 0, 876), _mm256_or_si256(outside(cb, -448, 448), outside(cr, -448, 448)));
+    int const lo = kMargin;
+    int const hi = (1 << 20) - kMargin;
+    bad = _mm256_or_si256(bad, _mm256_or_si256(outside(r, lo, hi), _mm256_or_si256(outside(g, lo, hi), outside(b, lo, hi))));
+    return _mm256_testz_si256(bad, bad) != 0;
 }
 
 // RGB gamut clip on eight lanes of codes; returns the pulled lanes as a mask.
@@ -421,7 +452,7 @@ void processBlockRgb(std::uint8_t const* src, std::uint8_t* dst, Lanes const& k,
         __m256i outY = applyRow(k, 0, y[i], cb[i / 2], cr[i / 2]);
         __m256i outCb = applyRow(k, 1, y[i], cb[i / 2], cr[i / 2]);
         __m256i outCr = applyRow(k, 2, y[i], cb[i / 2], cr[i / 2]);
-        __m256i const pulled = rgbClip8(outY, outCb, outCr);
+        __m256i const pulled = clearlyInside(outY, outCb, outCr) ? _mm256_setzero_si256() : rgbClip8(outY, outCb, outCr);
         __m256i clipY, clipCb, clipCr;
         oy[i] = clampRow(k, 0, outY, clipY);
         oc[i] = clampRow(k, 1, outCb, clipCb);
