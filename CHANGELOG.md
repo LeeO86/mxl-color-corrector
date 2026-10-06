@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.5
+
+- A new output `domain_def.json` carries `description` and `tags`, as BCP-007-03 requires (`id`, `label`, `description`, `tags`). The corrector wrote only `id` and `label`, and mxl-st2110-gateway 1.0.2 skipped such domains. An existing file is still not rewritten. The integration test checks the four fields.
+
 ## 1.0.4
 
 RGB gamut clip takes less CPU; the matrix path and all settings are unchanged. Lab host (2× Xeon Gold 6136), 4 channels of 1080p50 test-player bars with gain 1.1, saturation 1.2, pedestal 0.01: 1.89 → 1.33 cores with RGB gamut clip on, 0.79 cores off (unchanged). Bars sit on the faces of the RGB cube, the worst case; pictures mostly inside the cube gain more.

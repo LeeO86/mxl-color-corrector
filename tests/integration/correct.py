@@ -145,6 +145,11 @@ def main():
                 time.sleep(0.2)
         if neutral is None:
             raise SystemExit("no output grain: " + last)
+        with open(os.path.join(out_domain, "domain_def.json"), encoding="utf-8") as f:
+            definition = json.load(f)
+        # BCP-007-03 schema: id, label, description and tags are required.
+        if not all(key in definition for key in ("id", "label", "description", "tags")) or not isinstance(definition["tags"], dict):
+            raise SystemExit(f"domain_def.json is not BCP-007-03: {definition}")
         white = point(neutral, 120, 200)
         black = point(neutral, 1800, 200)
         if abs(white["cb"] - 512) > 8 or abs(white["cr"] - 512) > 8:
