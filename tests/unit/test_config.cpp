@@ -3,6 +3,7 @@
 #include "util/json.hpp"
 #include "util/uuid.hpp"
 
+#include <cmath>
 #include <filesystem>
 
 #include "doctest/doctest.h"
@@ -113,6 +114,82 @@ TEST_CASE("platform settings and address aliases")
     CHECK_THROWS_AS(loadConfig({{"MXL_CLEANUP_ON_EXIT", "maybe"}}, {}), ConfigError);
     CHECK(isAnnouncedAddress("10.1.2.3"));
     CHECK_FALSE(isAnnouncedAddress("not-an-ip"));
+}
+
+TEST_CASE("widget frame ancestors and setting origins")
+{
+    auto cfg = loadConfig({{"WEB_PORT", "8200"}}, {{"CC_CHANNELS", "3"}});
+    CHECK(cfg.widgetFrameAncestors == "'self'");
+    CHECK(cfg.origins.at("WEB_PORT") == "environment");
+    CHECK(cfg.origins.at("CC_CHANNELS") == "file");
+    CHECK(cfg.origins.at("CC_CLIP") == "default");
+    CHECK(cfg.origins.size() == settingValues(cfg).size());
+    CHECK(knownSetting("WIDGET_FRAME_ANCESTORS"));
+    auto listed = loadConfig({{"WIDGET_FRAME_ANCESTORS", "'self' https://designer.example"}}, {});
+    CHECK(listed.widgetFrameAncestors == "'self' https://designer.example");
+    CHECK(loadConfig({{"WIDGET_FRAME_ANCESTORS", "  "}}, {}).widgetFrameAncestors == "'self'");
+    CHECK_THROWS_AS(loadConfig({{"WIDGET_FRAME_ANCESTORS", "'self'; script-src *"}}, {}), ConfigError);
+    CHECK_THROWS_AS(loadConfig({{"WIDGET_FRAME_ANCESTORS", "https://a.example, https://b.example"}}, {}), ConfigError);
+}
+
+TEST_CASE("a wheel keeps the trims' luma, the pots move the wheel, and the trims survive a restart")
+{
+    auto dir = std::filesystem::temp_directory_path() / "mxl-cc-wheel-test";
+    std::filesystem::remove_all(dir);
+    auto cfg = loadConfig({{"CC_CHANNELS", "1"}, {"CC_STATE_DIR", dir.string()}}, {});
+    auto body = [](char const* text) { return parseJson(text); };
+    std::string error;
+    RgbTrim white{};
+    {
+        ControlStore store(cfg);
+        // RGB pots all at +10: a white level change, no tint.
+        REQUIRE(store.patch(1, body(R"({"white":{"r":10,"g":10,"b":10}})"), error));
+        CHECK(std::fabs(store.live(1).whiteWheelX) < 1e-9);
+        CHECK(std::fabs(store.live(1).whiteWheelY) < 1e-9);
+        // The wheel tints and keeps that luma part.
+        REQUIRE(store.patch(1, body(R"({"white_wheel":{"x":0.5,"y":0}})"), error));
+        auto c = store.live(1);
+        CHECK(trimLuma(c.white) == doctest::Approx(10));
+        CHECK(c.whiteWheelX == doctest::Approx(0.5));
+        CHECK(std::fabs(c.whiteWheelY) < 1e-9);
+        CHECK(c.white.r > c.white.g);
+        // One pot moves only its channel, and the wheel follows.
+        REQUIRE(store.patch(1, body(R"({"white":{"b":30}})"), error));
+        auto d = store.live(1);
+        CHECK(d.white.r == doctest::Approx(c.white.r));
+        CHECK(d.white.g == doctest::Approx(c.white.g));
+        CHECK(d.white.b == 30);
+        double x = 0, y = 0;
+        trimsToWheel(d.white.r, d.white.g, d.white.b, kWhiteWheelSpan, x, y);
+        CHECK(d.whiteWheelX == doctest::Approx(x));
+        CHECK(d.whiteWheelY == doctest::Approx(y));
+        CHECK(d.whiteWheelY > 0); // more blue
+        white = d.white;
+        // Numeric trims win over a wheel in the same patch (state files and presets carry both).
+        REQUIRE(store.patch(1, body(R"({"black":{"r":100,"g":-100,"b":0},"black_wheel":{"x":0,"y":0}})"), error));
+        auto e = store.live(1);
+        CHECK(e.black.r == 100);
+        CHECK(e.black.g == -100);
+        CHECK(std::hypot(e.blackWheelX, e.blackWheelY) == doctest::Approx(1)); // far beyond the black wheel: on the rim
+        // A wheel on top of a large luma part stays inside the trim range.
+        REQUIRE(store.patch(1, body(R"({"black":{"r":99,"g":99,"b":99}})"), error));
+        REQUIRE(store.patch(1, body(R"({"black_wheel":{"x":0,"y":1}})"), error));
+        CHECK(store.live(1).black.b == 100);
+        CHECK(store.live(1).black.r == doctest::Approx(99));
+        // Out of range is refused and changes nothing.
+        CHECK_FALSE(store.patch(1, body(R"({"pedestal":100.5})"), error));
+        CHECK_FALSE(store.patch(1, body(R"({"white_wheel":{"x":1.5,"y":0}})"), error));
+        REQUIRE(store.patch(1, body(R"({"pedestal":-100,"brightness":100})"), error));
+    }
+    ControlStore again(cfg);
+    auto f = again.live(1);
+    CHECK(f.white.r == doctest::Approx(white.r));
+    CHECK(f.white.g == doctest::Approx(white.g));
+    CHECK(f.white.b == 30);
+    CHECK(f.black.r == doctest::Approx(99));
+    CHECK(f.pedestal == -100);
+    CHECK(f.brightness == 100);
+    std::filesystem::remove_all(dir);
 }
 
 TEST_CASE("uuid v5 is deterministic")

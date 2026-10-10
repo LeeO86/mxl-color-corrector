@@ -46,6 +46,10 @@ struct Config
     int shutdownTimeoutS = 10;
     bool cleanupOnExit = false;
     std::uint64_t historyDurationNs = 200000000;
+    // CSP frame-ancestors of the /widget pages; /widgets answers these origins with CORS.
+    std::string widgetFrameAncestors = "'self'";
+    // Where each setting came from: environment, file or default.
+    std::map<std::string, std::string> origins;
 };
 
 // An address we may announce to other systems: an IP literal that is not
@@ -57,6 +61,8 @@ struct Config
 
 [[nodiscard]] std::string hostnameString();
 [[nodiscard]] bool knownSetting(std::string const& key);
+// Every setting with its effective value, in the order of the README table.
+[[nodiscard]] std::vector<std::pair<std::string, std::string>> settingValues(Config const& cfg);
 [[nodiscard]] Config loadConfig(std::map<std::string, std::string> const& env, std::map<std::string, std::string> const& file);
 [[nodiscard]] Config loadConfigFromEnv(std::map<std::string, std::string> const& env);
 

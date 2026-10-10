@@ -1,6 +1,6 @@
 # mxl-color-corrector
 
-Live colour correction for MXL `video/v210` flows. Each channel reads one video flow and writes one corrected flow. White and black balance, master gain and pedestal, brightness and saturation are one affine 3×4 matrix in Y′CbCr, applied slice by slice.
+Live colour correction for MXL `video/v210` flows. Each channel reads one video flow and writes one corrected flow. White and black balance, master gain and pedestal, brightness and saturation are one affine 3×4 matrix in Y′CbCr, applied slice by slice. The web UI has colour wheels or RGB pots per correction section, and operator screens can frame the `controls` and `bypass` widgets.
 
 Version 1.0.0 is the stable settings and API contract. A breaking change needs 2.0.0.
 
@@ -45,7 +45,8 @@ Environment overrides `CC_CONFIG_FILE`, which overrides the defaults. Unknown en
 | `NMOS_TAGS` | `{}` | JSON object of tag name to array of strings, copied onto the node and device |
 | `NMOS_HOST_ADDRESS` | first non-loopback IPv4 | Address announced in the node href and `api.endpoints[].host` |
 | `HOST_ID` | hostname | Alias. Used as `NMOS_LABEL` when that is unset. Used as `NMOS_HOST_ADDRESS` only when the value is a non-loopback IP literal |
-| `WEB_PORT` | `8140` | Admin UI, REST, `/livez`, `/readyz`, `/metrics`, UI WebSocket |
+| `WEB_PORT` | `8140` | Admin UI, REST, `/livez`, `/readyz`, `/metrics`, UI WebSocket, widgets |
+| `WIDGET_FRAME_ANCESTORS` | `'self'` | CSP `frame-ancestors` of the `/widget` pages; `/widgets` answers these origins with CORS. `;`, `,` or control characters exit 78 |
 | `SHUTDOWN_TIMEOUT_S` | `10` | Budget for SIGTERM. The Deployment grace period must be larger |
 
 `NMOS_SEED` defaults to `<HOST_ID>-cc` when `HOST_ID` is set, otherwise `<hostname>-cc`. `NMOS_LABEL` defaults to `HOST_ID` when that is set, otherwise `MXL Color Corrector`.
@@ -56,7 +57,7 @@ Environment overrides `CC_CONFIG_FILE`, which overrides the defaults. Unknown en
 
 | Port | Setting | Role |
 | --- | --- | --- |
-| 8140 | `WEB_PORT` | UI, API, probes, metrics, `WS /api/v1/events` |
+| 8140 | `WEB_PORT` | UI, API, probes, metrics, `WS /api/v1/events`, widgets; also the IS-04 and IS-05 APIs (for the UI) |
 | 3292 | `NMOS_PORT` | IS-04 node API and IS-05 connection API |
 
 Two instances on one host need distinct `WEB_PORT` and `NMOS_PORT`. A port that cannot be bound exits **75**.
@@ -76,16 +77,52 @@ Two instances on one host need distinct `WEB_PORT` and `NMOS_PORT`. A port that 
 - Presets: `GET/POST /api/v1/channels/{n}/presets`, `POST …/{name}/recall`, `DELETE …/{name}`, and the same under `/api/v1/presets` for every channel
 - `GET /api/v1/channels/{n}/preview/input.jpg` and `output.jpg`
 - `GET /api/v1/config/export`, `POST /api/v1/config/import`
+- `GET /api/v1/config`: every setting as `{key, value, source}`, `source` being `environment`, `file` or `default`
 - `GET /api/v1/settings`, `GET /api/v1/nmos`
+- `GET /api/v1/status` (also `/statusz`): `version`, `mxl_revision`, `label`, the channels and the NMOS summary
 - `WS /api/v1/events`
-- IS-04 `/x-nmos/node/v1.3/` and IS-05 `/x-nmos/connection/v1.1/single/` on `NMOS_PORT`; the device lists the IS-05 control `urn:x-nmos:control:sr-ctrl/v1.1` with href `http://NMOS_HOST_ADDRESS:NMOS_PORT/x-nmos/connection/v1.1/`
+- `GET /widgets`, `GET /widget/controls?channel=<n>`, `GET /widget/bypass?channel=<n>` (with `&theme=dark|light|transparent`), see [Widgets](#widgets)
+- IS-04 `/x-nmos/node/v1.3/` and IS-05 `/x-nmos/connection/v1.1/single/` on `NMOS_PORT`, and on `WEB_PORT` for the UI's activation form; the device lists the IS-05 control `urn:x-nmos:control:sr-ctrl/v1.1` with href `http://NMOS_HOST_ADDRESS:NMOS_PORT/x-nmos/connection/v1.1/`
 
 Import restores channels, presets and IS-05 routes. The `settings` object in an export is a snapshot for `production-export`; import does not change ports or identity, which stay on the environment. There is nothing secret to omit.
 
 ## Platform
 
-The image is `ghcr.io/leeo86/mxl-color-corrector:1.0.5`, uid 1000, pod network, MXL root hostPath `/Volumes/mxl`, writable `/config`. `deploy/k8s/deployment.yaml` sets `NMOS_HOST_ADDRESS` from `status.podIP`, `MXL_CLEANUP_ON_EXIT=true`, and `terminationGracePeriodSeconds: 20`. `production-down` should SIGTERM and then see the node and this instance's domain disappear.
+The image is `ghcr.io/leeo86/mxl-color-corrector:1.1.0`, uid 1000, pod network, MXL root hostPath `/Volumes/mxl`, writable `/config`. `deploy/k8s/deployment.yaml` sets `NMOS_HOST_ADDRESS` from `status.podIP`, `MXL_CLEANUP_ON_EXIT=true`, and `terminationGracePeriodSeconds: 20`. `production-down` should SIGTERM and then see the node and this instance's domain disappear.
 
 ## Controls
 
-`PATCH /api/v1/channels/{n}/controls` accepts any subset. A colour wheel is `white_wheel` / `black_wheel` as `{x, y}` in −1…+1. Open UIs stay in sync on the WebSocket, which sends at most 30 updates per second from the page.
+`PATCH /api/v1/channels/{n}/controls` accepts any subset; a value out of range answers 400 and changes nothing. Percentages are of the nominal range (Y 64–940), gain and saturation of unity.
+
+| Control | Field | Range | Default |
+| --- | --- | --- | --- |
+| White colour (R, G, B gain trims) | `white: {r, g, b}` | −100 … +100 % (was ±20 % before 1.1.0) | 0 |
+| Black colour (R, G, B pedestal trims) | `black: {r, g, b}` | −100 … +100 % (was ±5 %) | 0 |
+| Gain | `gain` | 0 … 200 % | 100 |
+| Pedestal | `pedestal` | −100 … +100 % (was ±10 %) | 0 |
+| Brightness | `brightness` | −100 … +100 % (was ±20 %) | 0 |
+| Saturation | `saturation` | 0 … 200 % | 100 |
+| Colour wheels | `white_wheel`, `black_wheel: {x, y}` | −1 … +1 | 0 |
+
+The R, G, B trims are the parameters. A colour wheel is a view of their tint: `+x` is red (Cr), `+y` is blue (Cb), and its rim is a luma-neutral tint of 20 % (white) or 5 % (black), as in 1.0. Sending a wheel position sets the trims' tint and keeps their luma part (what R, G and B share), so a wheel never changes brightness; the wheel position in every answer is read back from the trims. A tint beyond the wheel's reach (set with the trims) is shown on the rim in its direction. When a patch has both `white` and `white_wheel`, the trims win. A trim object may name one channel only, e.g. `{"white": {"g": 4}}`.
+
+Clipping keeps the output legal at any setting (`clip`: `legal` Y 64–940 and C 64–960, `extended` 4–1019, `off` 0–1023). Every corner of the ranges fits the 32-bit fixed-point path; the unit tests check each one against the double-precision reference.
+
+## Web UI
+
+Tabs with their own address: **Overview** (every channel with its output picture, state, source, processing mode, A/B and clipping), **Channel** (input and output pictures with a wipe; bypass, A/B and reset; white and black colour as a wheel or as RGB pots; gain, pedestal, brightness and saturation faders; clip and RGB gamut clip; presets of the channel and of every channel with save, recall and delete), **NMOS** (node, registration, receivers and senders, IS-05 activation and disable), **Status** (probes, versions, per channel counters from `/metrics`) and **Settings** (every setting with its origin; export and import). Light and dark follow the browser.
+
+Each colour section has a *Wheel* / *RGB* switch, kept in the browser. An RGB pot is a slider with − and + buttons for 0.1 % steps (held, they repeat), an exact value field and a reset; it works with a mouse, a keyboard and a touch screen. The wheel and the pots move the same trims, so each shows what the other set. Reset asks for a second press. Open UIs and widgets stay in sync on the WebSocket; the page sends at most 30 changes per second.
+
+## Widgets
+
+Operator screens (the platform's production designer) frame single controls of the corrector:
+
+| Widget | Query | Minimum size | Shows |
+| --- | --- | --- | --- |
+| `controls` | `channel` (required) | 480×360 | white and black colour (wheel or RGB pots), gain, pedestal, brightness and saturation |
+| `bypass` | `channel` (required) | 260×110 | bypass on and off, the A/B slot, reset (press twice) |
+
+`GET /widgets` lists them with a JSON schema of their parameters; it answers an `Origin` that `WIDGET_FRAME_ANCESTORS` names (or `*`) with `Access-Control-Allow-Origin` and `Vary: Origin`, and answers GET only. `GET /widget/<id>?channel=<n>[&theme=dark|light|transparent]` is the page without the app around it, on the corrector's own API; a bad parameter answers 400, an unknown widget 404. Only these routes carry `Content-Security-Policy: frame-ancestors <WIDGET_FRAME_ANCESTORS>` (default `'self'`), and none carries `X-Frame-Options`. The page posts `{type: "widget-ready"}` and `{type: "widget-size", w, h}` to its parent.
+
+The pictures are low-rate JPEG thumbnails (`CC_PREVIEW_FPS`), not video: the corrector has no WebRTC or HLS preview, so the platform's preview settings (`PREVIEW_*`) do not apply.

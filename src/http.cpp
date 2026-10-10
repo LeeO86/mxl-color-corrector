@@ -6,6 +6,7 @@
 #include <netinet/in.h>
 #include <poll.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -84,6 +85,7 @@ std::string statusText(int status)
         case 204: return "No Content";
         case 400: return "Bad Request";
         case 404: return "Not Found";
+        case 405: return "Method Not Allowed";
         case 409: return "Conflict";
         case 101: return "Switching Protocols";
         default: return "Error";
@@ -165,8 +167,7 @@ struct HttpServer::Impl
         }
         for (int fd : fds)
         {
-            ::shutdown(fd, SHUT_RDWR);
-            ::close(fd);
+            ::shutdown(fd, SHUT_RDWR); // its thread closes it
         }
         std::vector<Job> local;
         {
@@ -194,31 +195,35 @@ struct HttpServer::Impl
     void broadcast(std::string const& text)
     {
         auto frame = wsFrame(text);
-        std::vector<int> dead;
         std::lock_guard lock(clientsMu);
-        for (int fd : clients)
+        for (auto it = clients.begin(); it != clients.end();)
         {
-            if (!writeAll(fd, frame)) dead.push_back(fd);
-        }
-        for (int fd : dead)
-        {
-            clients.erase(std::remove(clients.begin(), clients.end(), fd), clients.end());
-            ::close(fd);
+            if (writeAll(*it, frame))
+            {
+                ++it;
+                continue;
+            }
+            // Only the client's own thread closes its socket: closed here, the number could go to a new
+            // connection while that thread still reads it. The shutdown ends its read.
+            ::shutdown(*it, SHUT_RDWR);
+            it = clients.erase(it);
         }
     }
 
-    bool readSome(int fd, std::string& data, int timeoutMs)
+    // 1 when bytes were appended, 0 on a timeout, -1 when the peer closed or the socket failed.
+    int readSome(int fd, std::string& data, int timeoutMs)
     {
         pollfd pfd{};
         pfd.fd = fd;
         pfd.events = POLLIN;
         int rc = ::poll(&pfd, 1, timeoutMs);
-        if (rc <= 0) return false;
+        if (rc == 0) return 0;
+        if (rc < 0) return -1;
         char buf[8192];
         ssize_t n = ::recv(fd, buf, sizeof(buf), 0);
-        if (n <= 0) return false;
+        if (n <= 0) return -1;
         data.append(buf, buf + n);
-        return true;
+        return 1;
     }
 
     bool readHttp(int fd, HttpRequest& req)
@@ -227,7 +232,7 @@ struct HttpServer::Impl
         while (data.find("\r\n\r\n") == std::string::npos)
         {
             if (stop.load()) return false;
-            if (!readSome(fd, data, 500)) return false;
+            if (readSome(fd, data, 500) <= 0) return false;
             if (data.size() > 1024 * 1024) return false;
         }
         auto headerEnd = data.find("\r\n\r\n");
@@ -268,7 +273,7 @@ struct HttpServer::Impl
         if (length > 2 * 1024 * 1024) return false;
         while (rest.size() < length)
         {
-            if (!readSome(fd, rest, 500)) return false;
+            if (readSome(fd, rest, 500) <= 0) return false;
         }
         req.body = rest.substr(0, length);
         return true;
@@ -291,9 +296,12 @@ struct HttpServer::Impl
         out += "Content-Type: " + res.contentType + "\r\n";
         out += "Content-Length: " + std::to_string(res.body.size()) + "\r\n";
         out += "Connection: close\r\n";
-        out += "Access-Control-Allow-Origin: *\r\n";
-        out += "Access-Control-Allow-Methods: GET, POST, PATCH, DELETE, OPTIONS\r\n";
-        out += "Access-Control-Allow-Headers: Content-Type\r\n";
+        if (res.cors)
+        {
+            out += "Access-Control-Allow-Origin: *\r\n";
+            out += "Access-Control-Allow-Methods: GET, POST, PATCH, DELETE, OPTIONS\r\n";
+            out += "Access-Control-Allow-Headers: Content-Type\r\n";
+        }
         for (auto const& [key, value] : res.headers) out += key + ": " + value + "\r\n";
         out += "\r\n";
         out += res.body;
@@ -316,21 +324,26 @@ struct HttpServer::Impl
         std::string accept = base64(digest.data(), digest.size());
         std::string out = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: " + accept +
                           "\r\n\r\n";
-        if (!writeAll(fd, out)) return;
-        addClient(fd);
+        // A client that does not read is dropped by broadcast() after a second, not waited for.
+        timeval const sendTimeout{1, 0};
+        ::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &sendTimeout, sizeof(sendTimeout));
+        if (!writeAll(fd, out))
+        {
+            ::close(fd);
+            return;
+        }
         if (hello)
         {
             auto greeting = hello();
             if (!greeting.empty()) writeAll(fd, wsFrame(greeting));
         }
+        addClient(fd);
         std::string buffer;
         while (!stop.load())
         {
-            if (!readSome(fd, buffer, 200))
-            {
-                if (stop.load()) break;
-                continue;
-            }
+            int const got = readSome(fd, buffer, 200);
+            if (got == 0) continue;
+            if (got < 0) break; // closed by the client, or shut down by broadcast()
             while (buffer.size() >= 2)
             {
                 auto const* bytes = reinterpret_cast<unsigned char const*>(buffer.data());

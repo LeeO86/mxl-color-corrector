@@ -69,19 +69,20 @@ std::string validateControls(Controls const& c)
         }
         return {};
     };
-    if (auto e = range(c.white.r, -20, 20, "white.r"); !e.empty()) return e;
-    if (auto e = range(c.white.g, -20, 20, "white.g"); !e.empty()) return e;
-    if (auto e = range(c.white.b, -20, 20, "white.b"); !e.empty()) return e;
-    if (auto e = range(c.black.r, -5, 5, "black.r"); !e.empty()) return e;
-    if (auto e = range(c.black.g, -5, 5, "black.g"); !e.empty()) return e;
-    if (auto e = range(c.black.b, -5, 5, "black.b"); !e.empty()) return e;
+    double const lim = kOffsetLimit;
+    if (auto e = range(c.white.r, -lim, lim, "white.r"); !e.empty()) return e;
+    if (auto e = range(c.white.g, -lim, lim, "white.g"); !e.empty()) return e;
+    if (auto e = range(c.white.b, -lim, lim, "white.b"); !e.empty()) return e;
+    if (auto e = range(c.black.r, -lim, lim, "black.r"); !e.empty()) return e;
+    if (auto e = range(c.black.g, -lim, lim, "black.g"); !e.empty()) return e;
+    if (auto e = range(c.black.b, -lim, lim, "black.b"); !e.empty()) return e;
     if (auto e = range(c.whiteWheelX, -1, 1, "white_wheel.x"); !e.empty()) return e;
     if (auto e = range(c.whiteWheelY, -1, 1, "white_wheel.y"); !e.empty()) return e;
     if (auto e = range(c.blackWheelX, -1, 1, "black_wheel.x"); !e.empty()) return e;
     if (auto e = range(c.blackWheelY, -1, 1, "black_wheel.y"); !e.empty()) return e;
     if (auto e = range(c.gain, 0, 200, "gain"); !e.empty()) return e;
-    if (auto e = range(c.pedestal, -10, 10, "pedestal"); !e.empty()) return e;
-    if (auto e = range(c.brightness, -20, 20, "brightness"); !e.empty()) return e;
+    if (auto e = range(c.pedestal, -lim, lim, "pedestal"); !e.empty()) return e;
+    if (auto e = range(c.brightness, -lim, lim, "brightness"); !e.empty()) return e;
     if (auto e = range(c.saturation, 0, 200, "saturation"); !e.empty()) return e;
     return {};
 }
@@ -137,15 +138,32 @@ WheelTrims wheelToTrims(double x, double y, double maxPercent)
     return trims;
 }
 
+double trimLuma(RgbTrim const& trims)
+{
+    return bt709::kKr * trims.r + bt709::kKg * trims.g + bt709::kKb * trims.b;
+}
+
 void trimsToWheel(double r, double g, double b, double maxPercent, double& x, double& y)
 {
-    (void)g;
-    double const scale = (maxPercent / 100.0) / bt709::kCbScale;
-    double const cr = (scale == 0) ? 0 : (r / 100.0) / (bt709::kCrScale * scale);
-    double const cb = (scale == 0) ? 0 : (b / 100.0) / (bt709::kCbScale * scale);
-    x = clampd(cr, -1.0, 1.0);
-    y = clampd(cb, -1.0, 1.0);
-    (void)b;
+    x = 0;
+    y = 0;
+    if (maxPercent <= 0)
+    {
+        return;
+    }
+    // Trims = luma on R, G and B + a chroma offset; wheelToTrims made the offset with this scale.
+    double const luma = trimLuma({r, g, b});
+    double const scale = maxPercent / bt709::kCbScale;
+    double cr = (r - luma) / (bt709::kCrScale * scale);
+    double cb = (b - luma) / (bt709::kCbScale * scale);
+    double const radius = std::hypot(cb, cr);
+    if (radius > 1.0)
+    {
+        cb /= radius;
+        cr /= radius;
+    }
+    x = cr;
+    y = cb;
 }
 
 } // namespace cc

@@ -66,7 +66,8 @@ int main()
     cc::RuntimeBoard runtime(config.channels);
     cc::NmosNode nmos(config);
     std::string ui(cc::webui::indexHtml());
-    cc::Services services{&store, &runtime, &nmos, &ui, config.webPort == config.nmosPort};
+    // The IS-04 and IS-05 APIs answer on WEB_PORT too: the UI's activation form is same-origin.
+    cc::Services services{&store, &runtime, &nmos, &ui, true};
     cc::HttpServer web([&](cc::HttpRequest const& req, cc::HttpResponse& res) { cc::dispatchHttp(services, req, res); });
     web.setWebSocket(
         "/api/v1/events", [&](std::string const& message) { cc::handleEvent(services, message); }, [&] { return cc::eventsHello(services); });

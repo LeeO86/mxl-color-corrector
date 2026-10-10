@@ -12,10 +12,12 @@ export default defineConfig({
   server: {
     port: 5174,
     proxy: {
-      "/api": "http://127.0.0.1:8140",
+      "/api": { target: "http://127.0.0.1:8140", ws: true },
       "/metrics": "http://127.0.0.1:8140",
       "/livez": "http://127.0.0.1:8140",
+      "/readyz": "http://127.0.0.1:8140",
       "/statusz": "http://127.0.0.1:8140",
+      "/widgets": "http://127.0.0.1:8140",
       "/x-nmos": "http://127.0.0.1:8140",
     },
   },
