@@ -127,15 +127,33 @@ std::string hostnameString()
 
 bool knownSetting(std::string const& key)
 {
-    static char const* keys[] = {"CC_CHANNELS", "MXL_DOMAIN_SCAN_PATH", "MXL_OUTPUT_DOMAIN_DIR", "MXL_OUTPUT_DOMAIN_ID", "CC_CLIP", "CC_RGB_CLIP",
-        "CC_READ_OFFSET_GRAINS", "MXL_HISTORY_DURATION_NS", "MXL_CLEANUP_ON_EXIT", "NMOS_REGISTRY_ADDRESS", "NMOS_REGISTRY_PORT", "NMOS_QUERY_ADDRESS",
-        "NMOS_QUERY_PORT", "NMOS_DNS_SD", "NMOS_PORT", "NMOS_SEED", "NMOS_LABEL", "NMOS_TAGS", "NMOS_HOST_ADDRESS", "WEB_PORT", "CC_CONFIG_FILE", "HOST_ID",
-        "CC_STATE_DIR", "CC_LOG_LEVEL", "CC_PREVIEW_FPS", "SHUTDOWN_TIMEOUT_S"};
-    for (auto const* k : keys)
+    for (auto const& [k, _] : settingValues(Config{}))
     {
         if (key == k) return true;
     }
     return false;
+}
+
+std::vector<std::pair<std::string, std::string>> settingValues(Config const& cfg)
+{
+    auto const flag = [](bool v) { return std::string(v ? "true" : "false"); };
+    Json tags = Json::object();
+    for (auto const& [name, values] : cfg.nmosTags)
+    {
+        Json list = Json::array();
+        for (auto const& value : values) list.push(Json::str(value));
+        tags[name] = std::move(list);
+    }
+    return {{"CC_CHANNELS", std::to_string(cfg.channels)}, {"CC_CLIP", clipModeName(cfg.clip)}, {"CC_RGB_CLIP", cfg.rgbClip ? "on" : "off"},
+        {"CC_READ_OFFSET_GRAINS", std::to_string(cfg.wholeGrainOffset)}, {"CC_PREVIEW_FPS", std::to_string(cfg.previewFps)},
+        {"CC_LOG_LEVEL", cfg.logLevel}, {"CC_CONFIG_FILE", cfg.configFile}, {"CC_STATE_DIR", cfg.stateDir}, {"MXL_DOMAIN_SCAN_PATH", cfg.scanPath},
+        {"MXL_OUTPUT_DOMAIN_DIR", cfg.outputDomainDir}, {"MXL_OUTPUT_DOMAIN_ID", cfg.outputDomainId},
+        {"MXL_HISTORY_DURATION_NS", std::to_string(cfg.historyDurationNs)}, {"MXL_CLEANUP_ON_EXIT", flag(cfg.cleanupOnExit)},
+        {"NMOS_REGISTRY_ADDRESS", cfg.nmosRegistryAddress}, {"NMOS_REGISTRY_PORT", std::to_string(cfg.nmosRegistryPort)},
+        {"NMOS_QUERY_ADDRESS", cfg.nmosQueryAddress}, {"NMOS_QUERY_PORT", std::to_string(cfg.nmosQueryPort)}, {"NMOS_DNS_SD", flag(cfg.nmosDnsSd)},
+        {"NMOS_PORT", std::to_string(cfg.nmosPort)}, {"NMOS_SEED", cfg.nmosSeed}, {"NMOS_LABEL", cfg.nmosLabel}, {"NMOS_TAGS", tags.dump()},
+        {"NMOS_HOST_ADDRESS", cfg.nmosHostAddress}, {"HOST_ID", cfg.hostId}, {"WEB_PORT", std::to_string(cfg.webPort)},
+        {"WIDGET_FRAME_ANCESTORS", cfg.widgetFrameAncestors}, {"SHUTDOWN_TIMEOUT_S", std::to_string(cfg.shutdownTimeoutS)}};
 }
 
 Config loadConfig(std::map<std::string, std::string> const& env, std::map<std::string, std::string> const& file)
@@ -273,6 +291,19 @@ Config loadConfig(std::map<std::string, std::string> const& env, std::map<std::s
             cfg.nmosTags.emplace_back(key, std::move(items));
         }
     }
+    cfg.widgetFrameAncestors = lookup(env, file, "WIDGET_FRAME_ANCESTORS", "");
+    if (cfg.widgetFrameAncestors.find_first_not_of(' ') == std::string::npos)
+    {
+        cfg.widgetFrameAncestors = Config{}.widgetFrameAncestors;
+    }
+    // One CSP directive's source list: a ';' or ',' would start another directive or policy.
+    for (unsigned char const c : cfg.widgetFrameAncestors)
+    {
+        if (c < 0x20 || c == 0x7f || c == ';' || c == ',')
+        {
+            throw ConfigError("WIDGET_FRAME_ANCESTORS must be a CSP source list, e.g. 'self' https://designer.example");
+        }
+    }
     try
     {
         cfg.nmosHostAddress = selectHostAddress(lookup(env, file, "NMOS_HOST_ADDRESS", ""), hostIdSet ? cfg.hostId : "", firstNonLoopbackIpv4());
@@ -294,6 +325,10 @@ Config loadConfig(std::map<std::string, std::string> const& env, std::map<std::s
         auto compact = cfg.outputDomainId;
         compact.erase(std::remove(compact.begin(), compact.end(), '-'), compact.end());
         cfg.outputDomainDir = cfg.scanPath + "/cc-" + compact.substr(0, 8);
+    }
+    for (auto const& [key, _] : settingValues(cfg))
+    {
+        cfg.origins[key] = env.count(key) ? "environment" : file.count(key) ? "file" : "default";
     }
     return cfg;
 }

@@ -25,6 +25,8 @@ struct HttpResponse
     std::string contentType = "application/json; charset=utf-8";
     std::string body;
     std::vector<std::pair<std::string, std::string>> headers;
+    // The API's CORS headers (any origin). The widget routes answer with their own.
+    bool cors = true;
 };
 
 class HttpServer

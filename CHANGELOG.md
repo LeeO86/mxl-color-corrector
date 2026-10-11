@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.1.0
+
+- **Ranges.** White colour (R, G, B gain trims) ±20 % → ±100 %, black colour (R, G, B pedestal trims) ±5 % → ±100 %, pedestal ±10 % → ±100 %, brightness ±20 % → ±100 %, in the API validation, the UI and the specification. Gain and saturation stay 0–200 %, the wheels ±1. Every corner of the new ranges fits the 32-bit AVX2 path (largest lane sum 1.64·10⁹ of 2.15·10⁹), stays within 1 LSB of the double-precision reference and is legal with `clip=legal` (unit tests over all 1024 corners).
+- **RGB pots** as the alternative to the colour wheels, per correction section and kept in the browser: a fader per R, G, B with − and + buttons for 0.1 % steps (held, they repeat), an exact value and a reset; mouse, keyboard and touch. The wheel and the pots set the same trims and show each other's changes: a wheel sets the trims' tint and keeps their luma part (it no longer drops a level set with R = G = B), the wheel position is read back from the trims (a pure luma offset no longer moves the dot), and a tint beyond the wheel's ±20 % / ±5 % reach sits on the marked rim. Numeric trims win over a wheel in the same patch, so a state file, preset or import keeps its trims exactly (1.0 rebuilt them from the stored wheel position and lost the luma part on restart). A trim object may carry one channel only.
+- **Web UI** in the look of the other LeeO86 media functions (mxl-webrtc-monitor, mxl-replay, mxl-multiviewer, mxl-srt-gateway, mxl-test-player): header with label, state, bypass and registration pills and the version; banners for a lost API, lost live updates and failed actions; tabs with their own address (Overview, Channel, NMOS, Status, Settings); light and dark theme. Every function stays and more are reachable: the preset list with recall and delete, per-control reset, IS-05 disable, the probes and `/metrics` counters (Status), every setting with its origin plus export and import (Settings). The colour wheel's hues now lie where the correction goes (red right, blue down; 1.0 drew red at the top). Reset asks for a second press.
+- **Widgets** for operator screens, the contract of mxl-webrtc-monitor 1.3.0 and mxl-replay 1.4.0: `GET /widgets` (CORS for the `WIDGET_FRAME_ANCESTORS` origins, GET only), `/widget/controls?channel=<n>` (wheels or RGB pots, gain, pedestal, brightness, saturation; 480×360) and `/widget/bypass?channel=<n>` (bypass, A/B, reset; 260×110), with `theme=dark|light|transparent`, `Content-Security-Policy: frame-ancestors` and no `X-Frame-Options`, posting `widget-ready` and `widget-size`. New setting `WIDGET_FRAME_ANCESTORS` (default `'self'`).
+- API additions: `GET /api/v1/config` (every setting with value and `source`), `version`, `mxl_revision` and `label` in the status. Preset names in paths are percent-decoded (a name with a space can be recalled and deleted).
+- No video previews: the pictures are JPEG thumbnails, so the platform's preview contract (`PREVIEW_*`) does not apply.
+
+### Fixes
+
+- A WebSocket client that went away without a close frame (a closed laptop, a killed browser, a dropped network) could stop the web server answering: the broadcast closed its socket while the client's thread kept reading the number, took the requests of the next connection that got it, and spun on a core. The broadcast now only shuts the socket down and the client's thread closes it; a client that does not take a status message within 1 s is dropped. Unit test.
+- The NMOS page's activation form sent IS-05 to `WEB_PORT`, where it was not served unless `NMOS_PORT` was the same port. The IS-04 and IS-05 APIs now answer on `WEB_PORT` too.
+- Typing a value into a field no longer gets overwritten by the next status push.
+
 ## 1.0.5
 
 - A new output `domain_def.json` carries `description` and `tags`, as BCP-007-03 requires (`id`, `label`, `description`, `tags`). The corrector wrote only `id` and `label`, and mxl-st2110-gateway 1.0.2 skipped such domains. An existing file is still not rewritten. The integration test checks the four fields.

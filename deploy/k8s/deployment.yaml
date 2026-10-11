@@ -23,7 +23,7 @@ spec:
         supplementalGroups: [1000]
       containers:
         - name: corrector
-          image: ghcr.io/leeo86/mxl-color-corrector:1.0.5
+          image: ghcr.io/leeo86/mxl-color-corrector:1.1.0
           imagePullPolicy: IfNotPresent
           ports:
             - name: web
@@ -65,6 +65,9 @@ spec:
               value: /config
             - name: SHUTDOWN_TIMEOUT_S
               value: "10"
+            # Origins that may frame the /widget pages (CSP frame-ancestors) and read /widgets.
+            # - name: WIDGET_FRAME_ANCESTORS
+            #   value: "'self' https://designer.example"
           readinessProbe:
             httpGet:
               path: /readyz

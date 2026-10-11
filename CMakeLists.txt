@@ -8,6 +8,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(CC_BUILD_TESTS "Build unit tests" ON)
 option(CC_WITH_MXL "Fetch and link MXL release/v1.1" ON)
+set(MXL_TAG 218ddaa0a08c12ffe75fc475ae65aa3d9eef16d7)
 
 find_package(Threads REQUIRED)
 
@@ -32,6 +33,7 @@ set(CC_CORE_SOURCES
 add_library(cc_core STATIC ${CC_CORE_SOURCES})
 target_include_directories(cc_core PUBLIC src third_party)
 target_link_libraries(cc_core PUBLIC Threads::Threads)
+target_compile_definitions(cc_core PRIVATE CC_MXL_REVISION="${MXL_TAG}")
 target_compile_options(cc_core PRIVATE -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers)
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
     set_source_files_properties(src/color/process_avx2.cpp PROPERTIES COMPILE_OPTIONS "-mavx2")
@@ -54,7 +56,6 @@ endif()
 if(CC_WITH_MXL)
     include(FetchContent)
     set(FETCHCONTENT_QUIET OFF)
-    set(MXL_TAG 218ddaa0a08c12ffe75fc475ae65aa3d9eef16d7)
     FetchContent_Declare(mxl_src
         GIT_REPOSITORY https://github.com/dmf-mxl/mxl.git
         GIT_TAG ${MXL_TAG}

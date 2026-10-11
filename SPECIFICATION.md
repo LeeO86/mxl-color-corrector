@@ -87,11 +87,11 @@ the whole channel.
 
 | Control | Operator term | What it does | Range / unit | Default |
 | --- | --- | --- | --- | --- |
-| **White colour** | "Farbe in Weiss" — white balance | R, G, B gain trims: tint the whites without moving black | each −20 % … +20 % | 0 % |
-| **Black colour** | "Farbe in Schwarz" — black balance | R, G, B pedestal trims: tint the blacks without moving white | each −5 % … +5 % of full range | 0 % |
+| **White colour** | "Farbe in Weiss" — white balance | R, G, B gain trims: tint the whites without moving black | each −100 % … +100 % | 0 % |
+| **Black colour** | "Farbe in Schwarz" — black balance | R, G, B pedestal trims: tint the blacks without moving white | each −100 % … +100 % of full range | 0 % |
 | **Gain** (master) | highlight correction | scales the signal from black: whites move, black stays | 0 % … 200 % | 100 % |
-| **Pedestal** (master) | lowlight correction, "Pedestal verschieben" | shifts the black level; the effect fades to zero at white, so whites stay | −10 % … +10 % | 0 % |
-| **Brightness** | "Helligkeit" | shifts the whole picture up/down (black and white move together) | −20 % … +20 % | 0 % |
+| **Pedestal** (master) | lowlight correction, "Pedestal verschieben" | shifts the black level; the effect fades to zero at white, so whites stay | −100 % … +100 % | 0 % |
+| **Brightness** | "Helligkeit" | shifts the whole picture up/down (black and white move together) | −100 % … +100 % | 0 % |
 | **Saturation** | "Farbsättigung" | scales chroma; 0 % is black-and-white | 0 % … 200 % | 100 % |
 
 Definitions (normalised RGB, 0 = black, 1 = white, per channel c ∈ {R, G, B}):
@@ -103,7 +103,9 @@ out_c       = pedestal_c + (gain_c − pedestal_c) × in_c + brightness
 ```
 
 So at `in = 0` the output is the pedestal (black level/colour), at `in = 1` it is
-the gain (white level/colour), and brightness offsets both. Saturation is then
+the gain (white level/colour), and brightness offsets both. The ranges of the trims,
+pedestal and brightness were ±20 %, ±5 %, ±10 % and ±20 % up to 1.0.5; operators needed
+the whole signal range (1.1.0). Gain and saturation are ratios and keep 0 … 200 %. Saturation is then
 applied as a scale of Cb/Cr around zero (luma unchanged). Percentages in the UI are
 relative to the nominal range (BT.709 narrow range: Y 64–940, C 64–960 at 10 bit).
 
@@ -114,6 +116,23 @@ camera control panel): dragging the point towards a hue tints the whites/blacks
 towards that hue; the wheel maps to the three R/G/B trims (with the trims kept
 luminance-neutral, i.e. dragging the wheel does not change brightness). Numeric
 R/G/B fields remain available for exact values. A "neutral" button resets a wheel.
+
+The **RGB pots** (1.1.0) are the alternative to a wheel, picked per section and kept in
+the browser: one fader per channel R, G, B with − and + buttons for fine steps (0.1 %,
+repeated while held), usable with a mouse, a keyboard and a touch screen.
+
+Both views set the same parameters, the three trims, and always show the same state:
+
+- trims = luma part (equal on R, G, B: `Kr·r + Kg·g + Kb·b`) + tint (the chroma part);
+- the wheel position is the tint, `x` = Cr, `y` = Cb, scaled so the rim is a tint of
+  20 % (white) or 5 % (black) towards blue, as in 1.0; the server reads it back from the
+  trims after every change;
+- moving the wheel replaces the tint and keeps the luma part (clamped to ±100 %); moving a
+  pot changes one trim, and the wheel follows;
+- a tint beyond the wheel's reach (only possible with the pots) is shown on the rim in its
+  direction and the rim is marked;
+- numeric trims in the same change win over a wheel position (state files, presets and
+  exports carry both).
 
 ### 4.3 Operation
 
@@ -200,12 +219,41 @@ R/G/B fields remain available for exact values. A "neutral" button resets a whee
   `whole-grain fallback`), clip indicator.
 - **Overview**: all channels with state, routed source label, bypass/A-B state.
 - **NMOS** and **Settings** pages like the siblings.
+- 1.1.0: the LeeO86 family look (mxl-webrtc-monitor, mxl-replay, mxl-multiviewer,
+  mxl-srt-gateway, mxl-test-player): header with label, state and registration pills and the
+  version, banners, tabs with their own address (`#overview`, `#channel`, `#nmos`, `#status`,
+  `#settings`), light and dark theme. The Channel page adds the RGB pots (§4.2), per-control
+  reset, and the preset list (recall, delete); Status shows the probes and the counters of
+  `/metrics`; Settings shows every setting with its origin (`GET /api/v1/config`) and the
+  export and import. The NMOS APIs answer on `WEB_PORT` too, so the activation form works.
+- The pictures are JPEG thumbnails at `CC_PREVIEW_FPS`. There is no video preview, so the
+  platform's preview contract (`PREVIEW_PUBLISH_URL`, `PREVIEW_WHEP_URL`, …) does not apply.
 - REST: `GET/PATCH /api/v1/channels/{n}/controls` (any subset of controls, values
   validated against ranges), presets CRUD, `POST …/bypass`, `POST …/ab`;
   WebSocket `/api/v1/events` for live state and control changes, so several open
   UIs stay in sync. Control changes from the UI are sent at most 30 times per
   second.
 - `/livez`, `/readyz`, `/statusz`, `/metrics` on `WEB_PORT`.
+
+### 7.1 Widgets (1.1.0, operator screens)
+
+The contract of mxl-webrtc-monitor 1.3.0 §6.6 and mxl-replay 1.4.0 §8.7.
+
+- `GET /widgets` answers `[{id, title, params, min_size: {w, h}, version}]` (`params` a
+  JSON schema of the query). It carries `Access-Control-Allow-Origin` for an `Origin`
+  that `WIDGET_FRAME_ANCESTORS` lists (or `*`), and `Vary: Origin`; GET only (405 otherwise).
+- `controls` (`channel`, required, 1..`CC_CHANNELS`; `min_size` 480×360): white and black
+  colour, each as a wheel or RGB pots (§4.2), and the gain, pedestal, brightness and
+  saturation faders of one channel. Clip settings stay on the Channel page.
+- `bypass` (`channel`, required; `min_size` 260×110): bypass on and off, the A/B slot, and
+  reset of every control (a second press within 3 s confirms).
+- `GET /widget/<id>?channel=<n>[&theme=dark|light|transparent]` is the embedded page with
+  only that widget, no app chrome, on the corrector's own API (same origin). An invalid
+  parameter answers 400, an unknown widget 404. These routes carry `Content-Security-Policy:
+  frame-ancestors <WIDGET_FRAME_ANCESTORS>` (default `'self'`; `;`, `,` or control
+  characters exit 78), no `X-Frame-Options`, and not the API's CORS headers.
+- The page posts `{type: "widget-ready"}` once it shows the channel, and
+  `{type: "widget-size", w, h}` then and on every resize, to `window.parent`.
 
 ---
 
@@ -235,6 +283,7 @@ Env > JSON file (`CC_CONFIG_FILE`) > defaults; invalid configuration exits 78.
 | `CC_STATE_DIR` | `/config` |
 | `CC_PREVIEW_FPS` | 4 |
 | `SHUTDOWN_TIMEOUT_S` | 10 |
+| `WIDGET_FRAME_ANCESTORS` | `'self'` (§7.1) |
 | `CC_LOG_LEVEL` | `info` |
 | `CC_CONFIG_FILE` | unset |
 | `HOST_ID` | hostname; label alias, and address alias only when it is an IP literal |

@@ -579,11 +579,175 @@ TEST_CASE("control ranges reject illegal values")
     controls.gain = 250;
     CHECK_FALSE(validateControls(controls).empty());
     controls.gain = 100;
-    controls.white.r = -21;
+    controls.white.r = -101;
     CHECK_FALSE(validateControls(controls).empty());
     bool ok = false;
     CHECK(parseClipMode("extended", ok) == ClipMode::Extended);
     CHECK(ok);
     CHECK(parseClipMode("nope", ok) == ClipMode::Legal);
     CHECK_FALSE(ok);
+}
+
+TEST_CASE("trims, pedestal and brightness take -100 to +100 percent")
+{
+    for (double const v : {-100.0, 100.0})
+    {
+        Controls controls;
+        controls.white = {v, v, -v};
+        controls.black = {v, -v, v};
+        controls.pedestal = v;
+        controls.brightness = v;
+        CHECK(validateControls(controls).empty());
+    }
+    for (double const v : {-100.1, 100.1})
+    {
+        Controls controls;
+        controls.pedestal = v;
+        CHECK_FALSE(validateControls(controls).empty());
+        controls = {};
+        controls.brightness = v;
+        CHECK_FALSE(validateControls(controls).empty());
+        controls = {};
+        controls.black.g = v;
+        CHECK_FALSE(validateControls(controls).empty());
+        controls = {};
+        controls.white.b = v;
+        CHECK_FALSE(validateControls(controls).empty());
+    }
+    Controls ratio;
+    ratio.gain = 200.1;
+    CHECK_FALSE(validateControls(ratio).empty());
+    ratio = {};
+    ratio.saturation = -0.1;
+    CHECK_FALSE(validateControls(ratio).empty());
+}
+
+TEST_CASE("every corner of the widened ranges: no overflow, AVX2 exact, legal output, 1 LSB")
+{
+    std::uint32_t seed = 99;
+    int corners = 0;
+    for (double const gain : {0.0, 200.0})
+    {
+        for (double const saturation : {0.0, 200.0})
+        {
+            for (double const pedestal : {-100.0, 100.0})
+            {
+                for (double const brightness : {-100.0, 100.0})
+                {
+                    for (int bits = 0; bits < 64; ++bits)
+                    {
+                        auto const sign = [bits](int bit) { return (bits >> bit) & 1 ? 100.0 : -100.0; };
+                        Controls controls;
+                        controls.gain = gain;
+                        controls.saturation = saturation;
+                        controls.pedestal = pedestal;
+                        controls.brightness = brightness;
+                        controls.white = {sign(0), sign(1), sign(2)};
+                        controls.black = {sign(3), sign(4), sign(5)};
+                        REQUIRE(validateControls(controls).empty());
+                        ++corners;
+                        auto const matrix = buildMatrix(controls);
+                        // The 32-bit AVX2 block path stays in use (and buildMatrix never clamps a coefficient).
+                        for (auto const& row : matrix.m)
+                        {
+                            std::int64_t const bound = (std::llabs(row[0]) + std::llabs(row[1]) + std::llabs(row[2])) * 1023 + std::llabs(row[3]) + 32768;
+                            CHECK(bound < 2147483647LL);
+                        }
+                        if (cpuHasAvx2() && corners % 8 == 0)
+                        {
+                            checkAvx2MatchesScalar(matrix, 96, 2, ++seed);
+                        }
+                        Controls open = controls;
+                        open.clip = ClipMode::Off;
+                        auto const openMatrix = buildMatrix(open);
+                        RgbAffine affine;
+                        controlsToAffine(controls, affine);
+                        for (int n = 0; n < 8; ++n)
+                        {
+                            int const y = static_cast<int>(lcg(seed) % 1024);
+                            int const cb = static_cast<int>(lcg(seed) % 1024);
+                            int const cr = static_cast<int>(lcg(seed) % 1024);
+                            int oy = 0, oc = 0, orr = 0;
+                            bool clipped = false;
+                            correctSample(matrix, y, cb, cr, oy, oc, orr, clipped);
+                            CHECK(oy >= 64);
+                            CHECK(oy <= 940);
+                            CHECK(oc >= 64);
+                            CHECK(oc <= 960);
+                            CHECK(orr >= 64);
+                            CHECK(orr <= 960);
+                            correctSample(openMatrix, y, cb, cr, oy, oc, orr, clipped);
+                            double ry, rc, rr;
+                            referenceYcbcr(affine, y, cb, cr, ry, rc, rr);
+                            CHECK(std::fabs(oy - std::clamp(ry, 0.0, 1023.0)) <= 1.0);
+                            CHECK(std::fabs(oc - std::clamp(rc, 0.0, 1023.0)) <= 1.0);
+                            CHECK(std::fabs(orr - std::clamp(rr, 0.0, 1023.0)) <= 1.0);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    CHECK(corners == 1024);
+}
+
+TEST_CASE("pedestal and brightness at the ends of the range")
+{
+    auto const at = [](Controls controls, int y) {
+        auto const matrix = buildMatrix(controls);
+        int oy = 0, oc = 0, orr = 0;
+        bool clipped = false;
+        correctSample(matrix, y, 512, 512, oy, oc, orr, clipped);
+        CHECK(std::abs(oc - 512) <= 1);
+        CHECK(std::abs(orr - 512) <= 1);
+        return oy;
+    };
+    Controls up;
+    up.pedestal = 100; // black up to white; white stays
+    CHECK(std::abs(at(up, 64) - 940) <= 1);
+    CHECK(std::abs(at(up, 502) - 940) <= 1);
+    CHECK(std::abs(at(up, 940) - 940) <= 1);
+    Controls down;
+    down.pedestal = -100; // black 100 % below black (clipped legal), mid grey to black, white stays
+    CHECK(at(down, 64) == 64);
+    CHECK(std::abs(at(down, 502) - 64) <= 1);
+    CHECK(std::abs(at(down, 940) - 940) <= 1);
+    Controls bright;
+    bright.brightness = 100;
+    CHECK(std::abs(at(bright, 64) - 940) <= 1);
+    bright.brightness = -100;
+    CHECK(at(bright, 940) == 64);
+}
+
+TEST_CASE("the wheel and the RGB trims describe the same parameters")
+{
+    double x = 1, y = 1;
+    // R = G = B is a luma offset: no tint, the wheel stays in the middle.
+    trimsToWheel(12, 12, 12, kWhiteWheelSpan, x, y);
+    CHECK(std::fabs(x) < 1e-12);
+    CHECK(std::fabs(y) < 1e-12);
+    // Trims = luma + the wheel's tint, back and forth, for both spans.
+    for (double const span : {kWhiteWheelSpan, kBlackWheelSpan})
+    {
+        for (auto const& [x0, y0] : {std::pair{0.3, -0.2}, std::pair{-0.7, 0.5}, std::pair{0.0, 0.99}, std::pair{0.6, 0.6}})
+        {
+            for (double const luma : {-30.0, 0.0, 7.5})
+            {
+                auto const tint = wheelToTrims(x0, y0, span);
+                RgbTrim const trims{luma + tint.r, luma + tint.g, luma + tint.b};
+                CHECK(trimLuma(trims) == doctest::Approx(luma));
+                trimsToWheel(trims.r, trims.g, trims.b, span, x, y);
+                CHECK(x == doctest::Approx(x0));
+                CHECK(y == doctest::Approx(y0));
+            }
+        }
+    }
+    // A tint beyond the wheel's reach (a red pot at +60 %) stays on the rim in its direction.
+    trimsToWheel(60, 0, 0, kWhiteWheelSpan, x, y);
+    CHECK(std::hypot(x, y) == doctest::Approx(1));
+    double ix = 0, iy = 0;
+    trimsToWheel(6, 0, 0, kWhiteWheelSpan, ix, iy);
+    CHECK(std::hypot(ix, iy) < 1);
+    CHECK(std::atan2(y, x) == doctest::Approx(std::atan2(iy, ix)));
+    CHECK(x > 0); // red is +x
 }

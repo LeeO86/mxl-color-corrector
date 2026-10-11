@@ -2,24 +2,35 @@
 
 #include "mode.hpp"
 #include "util/json.hpp"
+#include "version.hpp"
 
+#include <cctype>
 #include <optional>
+#include <sstream>
 
 namespace cc
 {
 namespace
 {
+// Path segments, percent-decoded (a preset name may hold spaces).
 std::vector<std::string> parts(std::string path)
 {
     if (!path.empty() && path.back() == '/') path.pop_back();
     std::vector<std::string> out;
     std::string cur;
-    for (char c : path)
+    for (std::size_t i = 0; i < path.size(); ++i)
     {
+        char const c = path[i];
         if (c == '/')
         {
             if (!cur.empty()) out.push_back(cur);
             cur.clear();
+        }
+        else if (c == '%' && i + 2 < path.size() && std::isxdigit(static_cast<unsigned char>(path[i + 1])) &&
+                 std::isxdigit(static_cast<unsigned char>(path[i + 2])))
+        {
+            cur.push_back(static_cast<char>(std::stoi(path.substr(i + 1, 2), nullptr, 16)));
+            i += 2;
         }
         else
         {
@@ -84,11 +95,125 @@ Json statusDocument(Services const& services)
 {
     Json doc = Json::object();
     doc["service"] = Json::str("mxl-color-corrector");
+    doc["version"] = Json::str(kVersion);
+    doc["mxl_revision"] = Json::str(CC_MXL_REVISION);
+    doc["label"] = Json::str(services.store->config().nmosLabel);
     doc["channels"] = Json::array();
     int n = services.store->channels();
     for (int i = 1; i <= n; ++i) doc["channels"].push(channelView(*services.store, *services.runtime, *services.nmos, i));
     doc["nmos"] = services.nmos->summary();
     return doc;
+}
+
+// A query parameter's raw value, empty when it is absent.
+std::string queryValue(std::string const& query, std::string const& name)
+{
+    std::size_t pos = 0;
+    while (pos < query.size())
+    {
+        auto end = query.find('&', pos);
+        if (end == std::string::npos) end = query.size();
+        auto const item = query.substr(pos, end - pos);
+        auto const eq = item.find('=');
+        if (item.substr(0, eq) == name) return eq == std::string::npos ? std::string() : item.substr(eq + 1);
+        pos = end + 1;
+    }
+    return {};
+}
+
+// True when the WIDGET_FRAME_ANCESTORS source list names this Origin (or holds `*`).
+bool listedOrigin(std::string const& sources, std::string origin)
+{
+    auto const normal = [](std::string text) {
+        for (char& c : text) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        while (!text.empty() && text.back() == '/') text.pop_back();
+        return text;
+    };
+    origin = normal(origin);
+    if (origin.empty() || origin == "null") return false;
+    std::istringstream tokens(sources);
+    std::string token;
+    while (tokens >> token)
+    {
+        if (token == "*" || normal(token) == origin) return true;
+    }
+    return false;
+}
+
+// GET /widgets: the operator-screen widgets, each with a JSON schema of its query.
+Json widgetsJson(int channels)
+{
+    Json list = Json::array();
+    auto add = [&](char const* id, char const* title, int w, int h) {
+        Json channel = Json::object();
+        channel["type"] = Json::str("integer");
+        channel["minimum"] = Json::number(1);
+        channel["maximum"] = Json::number(channels);
+        channel["title"] = Json::str("Channel");
+        Json params = Json::object();
+        params["type"] = Json::str("object");
+        params["properties"] = Json::object();
+        params["properties"]["channel"] = std::move(channel);
+        params["required"] = Json::array();
+        params["required"].push(Json::str("channel"));
+        Json item = Json::object();
+        item["id"] = Json::str(id);
+        item["title"] = Json::str(title);
+        item["params"] = std::move(params);
+        item["min_size"] = Json::object();
+        item["min_size"]["w"] = Json::number(w);
+        item["min_size"]["h"] = Json::number(h);
+        item["version"] = Json::str(kVersion);
+        list.push(std::move(item));
+    };
+    add("controls", "Colour correction", 480, 360);
+    add("bypass", "Colour correction bypass", 260, 110);
+    return list;
+}
+
+// /widgets and /widget/<id>?channel=<n>[&theme=dark|light|transparent] (SPECIFICATION.md §7.1). GET only;
+// no API CORS: the list answers the WIDGET_FRAME_ANCESTORS origins, the pages carry the CSP frame-ancestors.
+void serveWidget(Services const& services, HttpRequest const& req, std::string const& path, HttpResponse& res)
+{
+    auto const& cfg = services.store->config();
+    res.cors = false;
+    if (req.method != "GET")
+    {
+        res.headers.emplace_back("Allow", "GET");
+        jsonError(res, 405, "widgets answer GET only");
+        return;
+    }
+    if (path == "/widgets")
+    {
+        res.body = widgetsJson(cfg.channels).dump();
+        auto const origin = req.header("Origin");
+        if (listedOrigin(cfg.widgetFrameAncestors, origin)) res.headers.emplace_back("Access-Control-Allow-Origin", origin);
+        res.headers.emplace_back("Vary", "Origin");
+        return;
+    }
+    auto const id = path.substr(std::string("/widget/").size());
+    if (id != "controls" && id != "bypass")
+    {
+        jsonError(res, 404, "widget not found");
+        return;
+    }
+    auto const text = queryValue(req.query, "channel");
+    auto const channel = text.size() <= 2 ? channelNumber(text) : std::nullopt;
+    if (!channel || *channel < 1 || *channel > cfg.channels)
+    {
+        jsonError(res, 400, "channel must be a channel 1.." + std::to_string(cfg.channels));
+        return;
+    }
+    auto const theme = queryValue(req.query, "theme");
+    if (!theme.empty() && theme != "dark" && theme != "light" && theme != "transparent")
+    {
+        jsonError(res, 400, "theme must be dark, light or transparent");
+        return;
+    }
+    // The page picks the widget from its URL. Only these routes may be framed.
+    res.contentType = "text/html; charset=utf-8";
+    res.body = services.ui != nullptr ? *services.ui : std::string("<!doctype html><title>mxl-color-corrector</title><p>UI was not embedded.</p>");
+    res.headers.emplace_back("Content-Security-Policy", "frame-ancestors " + cfg.widgetFrameAncestors);
 }
 } // namespace
 
@@ -122,14 +247,19 @@ void handleEvent(Services const& services, std::string const& text)
 
 void dispatchHttp(Services const& services, HttpRequest const& req, HttpResponse& res)
 {
+    auto path = req.path;
+    if (!path.empty() && path.back() == '/') path.pop_back();
+    if (path == "/widgets" || path.rfind("/widget/", 0) == 0)
+    {
+        serveWidget(services, req, path, res);
+        return;
+    }
     if (req.method == "OPTIONS")
     {
         res.status = 204;
         res.body.clear();
         return;
     }
-    auto path = req.path;
-    if (!path.empty() && path.back() == '/') path.pop_back();
     if (services.serveNmos && (path == "/x-nmos" || path.rfind("/x-nmos/", 0) == 0))
     {
         services.nmos->handle(req, res);
@@ -219,6 +349,25 @@ void dispatchHttp(Services const& services, HttpRequest const& req, HttpResponse
         {
             jsonError(res, 400, ex.what());
         }
+        return;
+    }
+    if (path == "/api/v1/config" && req.method == "GET")
+    {
+        // Every setting with its value and origin (environment, file or default), for the Settings page.
+        auto const& cfg = services.store->config();
+        Json list = Json::array();
+        for (auto const& [key, value] : settingValues(cfg))
+        {
+            Json item = Json::object();
+            item["key"] = Json::str(key);
+            item["value"] = Json::str(value);
+            auto const origin = cfg.origins.find(key);
+            item["source"] = Json::str(origin != cfg.origins.end() ? origin->second : "default");
+            list.push(std::move(item));
+        }
+        Json doc = Json::object();
+        doc["settings"] = std::move(list);
+        res.body = doc.dump();
         return;
     }
     if (path == "/api/v1/settings")

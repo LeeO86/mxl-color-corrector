@@ -35,6 +35,15 @@ void putRgb(Json& obj, char const* key, RgbTrim const& rgb)
     obj[key] = std::move(v);
 }
 
+// The wheel's tint on top of the trims' luma part, kept inside the trim range.
+void applyWheel(RgbTrim& trims, double x, double y, double span)
+{
+    double const luma = trimLuma(trims);
+    auto const tint = wheelToTrims(x, y, span);
+    auto const limit = [](double v) { return std::clamp(v, -kOffsetLimit, kOffsetLimit); };
+    trims = {limit(luma + tint.r), limit(luma + tint.g), limit(luma + tint.b)};
+}
+
 Json wheelJson(double x, double y)
 {
     Json v = Json::object();
@@ -199,26 +208,15 @@ bool patchControls(Controls& controls, Json const& patch, std::string& error)
         }
         next.rgbClip = rgb->b;
     }
-    if (whiteWheel)
-    {
-        auto trims = wheelToTrims(next.whiteWheelX, next.whiteWheelY, 20);
-        next.white = {trims.r, trims.g, trims.b};
-    }
-    else if (whiteNumeric)
-    {
-        trimsToWheel(next.white.r, next.white.g, next.white.b, 20, next.whiteWheelX, next.whiteWheelY);
-    }
-    if (blackWheel)
-    {
-        auto trims = wheelToTrims(next.blackWheelX, next.blackWheelY, 5);
-        next.black = {trims.r, trims.g, trims.b};
-    }
-    else if (blackNumeric)
-    {
-        trimsToWheel(next.black.r, next.black.g, next.black.b, 5, next.blackWheelX, next.blackWheelY);
-    }
     error = validateControls(next);
     if (!error.empty()) return false;
+    // The R, G, B trims are the parameters (the RGB pots in the UI). A wheel sets their chroma part
+    // and keeps their luma part, so it does not change brightness; numeric trims in the same patch
+    // win. The wheel position is always read back from the trims.
+    if (whiteWheel && !whiteNumeric) applyWheel(next.white, next.whiteWheelX, next.whiteWheelY, kWhiteWheelSpan);
+    if (blackWheel && !blackNumeric) applyWheel(next.black, next.blackWheelX, next.blackWheelY, kBlackWheelSpan);
+    trimsToWheel(next.white.r, next.white.g, next.white.b, kWhiteWheelSpan, next.whiteWheelX, next.whiteWheelY);
+    trimsToWheel(next.black.r, next.black.g, next.black.b, kBlackWheelSpan, next.blackWheelX, next.blackWheelY);
     controls = next;
     return true;
 }
