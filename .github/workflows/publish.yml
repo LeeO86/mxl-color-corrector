@@ -32,8 +32,10 @@ jobs:
             major="${ver%%.*}"
             minor="${ver%.*}"
             echo "list=${image}:${ver},${image}:${minor},${image}:${major}" >> "$GITHUB_OUTPUT"
+            echo "version=${ver}" >> "$GITHUB_OUTPUT"
           else
             echo "list=${image}:git-${sha7},${image}:nightly-dev" >> "$GITHUB_OUTPUT"
+            echo "version=git-${sha7}" >> "$GITHUB_OUTPUT"
           fi
       - uses: docker/build-push-action@v6
         with:
@@ -44,5 +46,6 @@ jobs:
           labels: |
             org.opencontainers.image.source=https://github.com/LeeO86/mxl-color-corrector
             org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.tags.outputs.version }}
             org.opencontainers.image.licenses=MIT
             io.dmf.mxl.revision=218ddaa0a08c12ffe75fc475ae65aa3d9eef16d7

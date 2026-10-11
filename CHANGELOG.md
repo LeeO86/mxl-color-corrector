@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.1.1
+
+- The image's `org.opencontainers.image.version` label is the release version (1.1.0 showed `24.04`, inherited from the Ubuntu base image); untagged builds carry `git-<sha>`. No code change.
+
 ## 1.1.0
 
 - **Ranges.** White colour (R, G, B gain trims) ±20 % → ±100 %, black colour (R, G, B pedestal trims) ±5 % → ±100 %, pedestal ±10 % → ±100 %, brightness ±20 % → ±100 %, in the API validation, the UI and the specification. Gain and saturation stay 0–200 %, the wheels ±1. Every corner of the new ranges fits the 32-bit AVX2 path (largest lane sum 1.64·10⁹ of 2.15·10⁹), stays within 1 LSB of the double-precision reference and is legal with `clip=legal` (unit tests over all 1024 corners).
