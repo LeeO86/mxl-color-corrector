@@ -1,6 +1,7 @@
 #include "color/process.hpp"
 
 #include "color/bt709.hpp"
+#include "color/simd.hpp"
 #include "v210.hpp"
 
 #include <algorithm>
@@ -8,11 +9,6 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
-
-#if defined(__x86_64__) || defined(_M_X64)
-#include <cpuid.h>
-#include <immintrin.h>
-#endif
 
 namespace cc
 {
@@ -136,6 +132,9 @@ void processLineScalar(std::uint8_t const* src, std::uint8_t* dst, int width, in
 
     int const groups = v210Groups(width);
     std::memset(dst, 0, static_cast<std::size_t>(stride));
+    // Counted here and added once per line: through the pointer every pixel would be a load and a
+    // store, because `stats` may alias `dst` as far as the compiler knows.
+    std::uint64_t clippedPixels = 0;
     int x = 0;
     for (int g = 0; g < groups; ++g)
     {
@@ -159,18 +158,16 @@ void processLineScalar(std::uint8_t const* src, std::uint8_t* dst, int width, in
                 oc[i / 2] = static_cast<std::uint16_t>(outCb);
                 orr[i / 2] = static_cast<std::uint16_t>(outCr);
             }
-            if (stats)
-            {
-                stats->samples += 2;
-                if (clipped)
-                {
-                    stats->clipped += 1;
-                }
-            }
+            clippedPixels += clipped ? 1u : 0u;
         }
         std::uint32_t outWords[4];
         packV210Group(outWords, oy, oc, orr);
         std::memcpy(dst + static_cast<std::size_t>(g) * 16u, outWords, sizeof(outWords));
+    }
+    if (stats)
+    {
+        stats->samples += static_cast<std::uint64_t>(width) * 2u;
+        stats->clipped += clippedPixels;
     }
 }
 } // namespace
@@ -294,41 +291,33 @@ void processV210Scalar(std::uint8_t const* src, std::uint8_t* dst, int width, in
 
 bool cpuHasAvx2()
 {
-#if defined(__x86_64__) || defined(_M_X64)
-    unsigned int eax = 0, ebx = 0, ecx = 0, edx = 0;
-    if (__get_cpuid(1, &eax, &ebx, &ecx, &edx) == 0)
-    {
-        return false;
-    }
-    bool const osxsave = (ecx & (1u << 27)) != 0;
-    bool const avx = (ecx & (1u << 28)) != 0;
-    if (!osxsave || !avx)
-    {
-        return false;
-    }
-    if (__get_cpuid_count(7, 0, &eax, &ebx, &ecx, &edx) == 0)
-    {
-        return false;
-    }
-    if ((ebx & (1u << 5)) == 0)
-    {
-        return false;
-    }
-    unsigned int xcr = 0, xcrHi = 0;
-    __asm__ volatile("xgetbv" : "=a"(xcr), "=d"(xcrHi) : "c"(0));
-    return (xcr & 0x6u) == 0x6u;
-#else
-    return false;
-#endif
+    return detectCpuSimd().avx2;
+}
+
+bool cpuHasAvx512()
+{
+    return detectCpuSimd().avx512;
 }
 
 void processV210(std::uint8_t const* src, std::uint8_t* dst, int width, int height, int srcStride, int dstStride, int rowBegin, int rowEnd,
     FixedMatrix const& matrix, ProcessStats* stats)
 {
-    if (!matrix.bypass && cpuHasAvx2())
+    if (!matrix.bypass)
     {
-        processV210Avx2(src, dst, width, height, srcStride, dstStride, rowBegin, rowEnd, matrix, stats);
-        return;
+        switch (simdLevel())
+        {
+            case SimdLevel::Avx512:
+                processV210Avx512(src, dst, width, height, srcStride, dstStride, rowBegin, rowEnd, matrix, stats);
+                return;
+            case SimdLevel::Avx512Vl:
+                processV210Avx512Vl(src, dst, width, height, srcStride, dstStride, rowBegin, rowEnd, matrix, stats);
+                return;
+            case SimdLevel::Avx2:
+                processV210Avx2(src, dst, width, height, srcStride, dstStride, rowBegin, rowEnd, matrix, stats);
+                return;
+            case SimdLevel::Scalar:
+                break;
+        }
     }
     processV210Scalar(src, dst, width, height, srcStride, dstStride, rowBegin, rowEnd, matrix, stats);
 }

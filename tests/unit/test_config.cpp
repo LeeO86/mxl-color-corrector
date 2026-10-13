@@ -42,6 +42,15 @@ TEST_CASE("env wins over the file and unknown file keys fail")
     CHECK_THROWS_AS(loadConfig({{"MXL_OUTPUT_DOMAIN_ID", "not-a-uuid"}}, {}), ConfigError);
 }
 
+TEST_CASE("CC_SIMD defaults to auto and takes the five levels")
+{
+    CHECK(loadConfig({}, {}).simd == "auto");
+    CHECK(loadConfig({{"CC_SIMD", "avx512vl"}}, {}).simd == "avx512vl");
+    CHECK(loadConfig({}, {{"CC_SIMD", "scalar"}}).simd == "scalar");
+    CHECK_THROWS_AS(loadConfig({{"CC_SIMD", "sse4"}}, {}), ConfigError);
+    CHECK(knownSetting("CC_SIMD"));
+}
+
 TEST_CASE("state roundtrip and presets")
 {
     auto dir = std::filesystem::temp_directory_path() / "mxl-cc-state-test";

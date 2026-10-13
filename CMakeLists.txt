@@ -17,6 +17,8 @@ set(CC_CORE_SOURCES
     src/color/controls.cpp
     src/color/process.cpp
     src/color/process_avx2.cpp
+    src/color/process_avx512.cpp
+    src/color/simd.cpp
     src/util/sha1.cpp
     src/util/uuid.cpp
     src/util/json.cpp
@@ -35,9 +37,10 @@ target_include_directories(cc_core PUBLIC src third_party)
 target_link_libraries(cc_core PUBLIC Threads::Threads)
 target_compile_definitions(cc_core PRIVATE CC_MXL_REVISION="${MXL_TAG}")
 target_compile_options(cc_core PRIVATE -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers)
-if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
-    set_source_files_properties(src/color/process_avx2.cpp PROPERTIES COMPILE_OPTIONS "-mavx2")
-endif()
+# The AVX2 and AVX-512 kernels pick their instructions by function attribute (runtime dispatch,
+# CC_SIMD); the build stays plain x86-64. No FMA contraction: the gamut clip must round exactly as
+# the scalar reference.
+set_source_files_properties(src/color/process_avx2.cpp src/color/process_avx512.cpp PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
 
 if(CC_BUILD_TESTS)
     enable_testing()

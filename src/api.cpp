@@ -1,5 +1,7 @@
 #include "api.hpp"
 
+#include "color/simd.hpp"
+
 #include "mode.hpp"
 #include "util/json.hpp"
 #include "version.hpp"
@@ -97,6 +99,14 @@ Json statusDocument(Services const& services)
     doc["service"] = Json::str("mxl-color-corrector");
     doc["version"] = Json::str(kVersion);
     doc["mxl_revision"] = Json::str(CC_MXL_REVISION);
+    static CpuSimd const cpu = detectCpuSimd();
+    Json simd = Json::object();
+    simd["level"] = Json::str(simdName(simdLevel()));
+    simd["requested"] = Json::str(services.store->config().simd);
+    simd["auto"] = Json::str(simdName(autoSimdLevel(cpu)));
+    simd["cpu"] = Json::str(cpu.avx512 ? "avx512" : cpu.avx2 ? "avx2" : "scalar");
+    simd["cpu_family"] = Json::str(cpu.family);
+    doc["simd"] = std::move(simd);
     doc["label"] = Json::str(services.store->config().nmosLabel);
     doc["channels"] = Json::array();
     int n = services.store->channels();

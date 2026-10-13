@@ -26,6 +26,7 @@ Environment overrides `CC_CONFIG_FILE`, which overrides the defaults. Unknown en
 | `CC_RGB_CLIP` | `off` | RGB gamut clip |
 | `CC_READ_OFFSET_GRAINS` | `1` | Whole-grain read offset. Slice mode always follows the writer |
 | `CC_PREVIEW_FPS` | `4` | Thumbnail rate, 1–30 |
+| `CC_SIMD` | `auto` | CPU code for the colour processing: `auto`, `avx512`, `avx512vl`, `avx2` or `scalar` ([CPU code](#cpu-code-cc_simd)) |
 | `CC_LOG_LEVEL` | `info` | `error`, `warn`, `info` |
 | `CC_CONFIG_FILE` | unset | JSON object of the keys in this table |
 | `CC_STATE_DIR` | `/config` | Writable state directory |
@@ -79,7 +80,7 @@ Two instances on one host need distinct `WEB_PORT` and `NMOS_PORT`. A port that 
 - `GET /api/v1/config/export`, `POST /api/v1/config/import`
 - `GET /api/v1/config`: every setting as `{key, value, source}`, `source` being `environment`, `file` or `default`
 - `GET /api/v1/settings`, `GET /api/v1/nmos`
-- `GET /api/v1/status` (also `/statusz`): `version`, `mxl_revision`, `label`, the channels and the NMOS summary
+- `GET /api/v1/status` (also `/statusz`): `version`, `mxl_revision`, `label`, `simd` ([CPU code](#cpu-code-cc_simd)), the channels and the NMOS summary
 - `WS /api/v1/events`
 - `GET /widgets`, `GET /widget/controls?channel=<n>`, `GET /widget/bypass?channel=<n>` (with `&theme=dark|light|transparent`), see [Widgets](#widgets)
 - IS-04 `/x-nmos/node/v1.3/` and IS-05 `/x-nmos/connection/v1.1/single/` on `NMOS_PORT`, and on `WEB_PORT` for the UI's activation form; the device lists the IS-05 control `urn:x-nmos:control:sr-ctrl/v1.1` with href `http://NMOS_HOST_ADDRESS:NMOS_PORT/x-nmos/connection/v1.1/`
@@ -88,7 +89,30 @@ Import restores channels, presets and IS-05 routes. The `settings` object in an 
 
 ## Platform
 
-The image is `ghcr.io/leeo86/mxl-color-corrector:1.1.1`, uid 1000, pod network, MXL root hostPath `/Volumes/mxl`, writable `/config`. `deploy/k8s/deployment.yaml` sets `NMOS_HOST_ADDRESS` from `status.podIP`, `MXL_CLEANUP_ON_EXIT=true`, and `terminationGracePeriodSeconds: 20`. `production-down` should SIGTERM and then see the node and this instance's domain disappear.
+The image is `ghcr.io/leeo86/mxl-color-corrector:1.2.0`, uid 1000, pod network, MXL root hostPath `/Volumes/mxl`, writable `/config`. `deploy/k8s/deployment.yaml` sets `NMOS_HOST_ADDRESS` from `status.podIP`, `MXL_CLEANUP_ON_EXIT=true`, and `terminationGracePeriodSeconds: 20`. `production-down` should SIGTERM and then see the node and this instance's domain disappear.
+
+## CPU code (`CC_SIMD`)
+
+The image is plain x86-64; the colour processing picks its code at start from what the CPU and the OS offer (cpuid, and XGETBV for the saved register state). Every level writes the same bytes and the same clip statistics as the scalar reference.
+
+| `CC_SIMD` | Code |
+| --- | --- |
+| `auto` (default) | `avx512` on Ice Lake and later Xeons, AMD Zen 4 and Zen 5; `avx2` on Skylake-SP and Cascade Lake (their 512-bit frequency licence slows the other hyperthread of the core) and on every CPU with AVX2 but no AVX-512 (e.g. i9-9900K, EPYC Rome/Milan); `scalar` without AVX2 |
+| `avx512` | AVX-512 on 512-bit registers (16 v210 groups per step) |
+| `avx512vl` | AVX-512 instructions on 256-bit registers (masks, 32 registers) |
+| `avx2` | AVX2 |
+| `scalar` | the reference code |
+
+A level the CPU does not have falls back to the best one below it, with a warning in the log; any other value exits 78. The choice is in the start log (`simd avx2 (CC_SIMD=auto, cpu avx512 (skylake-sp))`), in the status (`"simd": {"level", "requested", "auto", "cpu", "cpu_family"}`) and in the metric `mxl_color_corrector_simd_level{level="avx2"} 1`.
+
+On the lab's Xeon Gold 6136 (Skylake-SP), 2 channels of 1080p50 test-player bars (gain 110 %, saturation 120 %, pedestal 1 %), all grains on time, CPU per channel:
+
+| RGB gamut clip | 1.1.1 | `avx2` | `avx512vl` | `avx512` |
+| --- | --- | --- | --- | --- |
+| off | 0.199 | 0.166 | 0.155 | 0.135 |
+| on | 0.841 | 0.725 | 0.583 | 0.435 |
+
+`avx512` saves 19 % (off) and 40 % (on) there, but it costs a workload on the same core's other hyperthread 3.4–4 % against `avx2` (the rule for `auto` allows less than 3 %). Set it on Skylake-SP hosts whose cores are not shared; `avx512vl` saves 20 % with RGB gamut clip on bars-like pictures (about 8 % on camera pictures) and costs the neighbour nothing. Details and the per-CPU numbers: [docs/performance.md](docs/performance.md).
 
 ## Controls
 

@@ -1,5 +1,7 @@
 #include "metrics.hpp"
 
+#include "color/simd.hpp"
+
 #include "mode.hpp"
 
 #include <algorithm>
@@ -229,6 +231,9 @@ std::string RuntimeBoard::render(double processCpuSeconds) const
     cpu.precision(6);
     cpu << processCpuSeconds;
     out += "mxl_color_corrector_process_cpu_seconds_total " + cpu.str() + "\n";
+    out += "# HELP mxl_color_corrector_simd_level The colour processing code in use (CC_SIMD), 1 for that level\n";
+    out += "# TYPE mxl_color_corrector_simd_level gauge\n";
+    out += std::string("mxl_color_corrector_simd_level{level=\"") + simdName(simdLevel()) + "\"} 1\n";
     return out;
 }
 

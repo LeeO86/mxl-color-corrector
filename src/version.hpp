@@ -2,5 +2,5 @@
 
 namespace cc
 {
-inline constexpr char kVersion[] = "1.1.1";
+inline constexpr char kVersion[] = "1.2.0";
 }

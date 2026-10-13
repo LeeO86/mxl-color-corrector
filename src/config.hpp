@@ -43,6 +43,8 @@ struct Config
     std::string logLevel = "info";
     std::string configFile;
     int previewFps = 4;
+    // CC_SIMD: auto, avx512, avx512vl, avx2 or scalar (color/simd.hpp).
+    std::string simd = "auto";
     int shutdownTimeoutS = 10;
     bool cleanupOnExit = false;
     std::uint64_t historyDurationNs = 200000000;

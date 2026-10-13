@@ -1,13 +1,16 @@
 #include "color/bt709.hpp"
 #include "color/controls.hpp"
 #include "color/process.hpp"
+#include "color/simd.hpp"
 #include "mode.hpp"
 #include "v210.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
+#include <string>
 #include <vector>
 
 #include "doctest/doctest.h"
@@ -67,28 +70,75 @@ void fillAny(std::vector<std::uint8_t>& frame, int width, int height, std::uint3
     }
 }
 
-// The AVX2 path against the scalar reference: output bytes and statistics.
-void checkAvx2MatchesScalar(FixedMatrix const& matrix, int width, int height, std::uint32_t seed)
+// The SIMD levels this CPU can run (under Intel SDE in CI: the emulated CPU's).
+std::vector<SimdLevel> simdLevels()
+{
+    std::vector<SimdLevel> levels;
+    if (cpuHasAvx2())
+    {
+        levels.push_back(SimdLevel::Avx2);
+    }
+    if (cpuHasAvx512())
+    {
+        levels.push_back(SimdLevel::Avx512Vl);
+        levels.push_back(SimdLevel::Avx512);
+    }
+    return levels;
+}
+
+void processAt(SimdLevel level, std::uint8_t const* src, std::uint8_t* dst, int width, int height, int srcStride, int dstStride, int rowBegin,
+    int rowEnd, FixedMatrix const& matrix, ProcessStats* stats)
+{
+    switch (level)
+    {
+        case SimdLevel::Avx512:
+            processV210Avx512(src, dst, width, height, srcStride, dstStride, rowBegin, rowEnd, matrix, stats);
+            break;
+        case SimdLevel::Avx512Vl:
+            processV210Avx512Vl(src, dst, width, height, srcStride, dstStride, rowBegin, rowEnd, matrix, stats);
+            break;
+        case SimdLevel::Avx2:
+            processV210Avx2(src, dst, width, height, srcStride, dstStride, rowBegin, rowEnd, matrix, stats);
+            break;
+        case SimdLevel::Scalar:
+            processV210Scalar(src, dst, width, height, srcStride, dstStride, rowBegin, rowEnd, matrix, stats);
+            break;
+    }
+}
+
+// Every SIMD level against the scalar reference on one frame: output bytes and statistics, and the
+// same bytes without statistics.
+void checkFrame(FixedMatrix const& matrix, std::vector<std::uint8_t> const& src, int width, int height)
+{
+    std::vector<std::uint8_t> a(src.size(), 0xAA);
+    ProcessStats sa;
+    processV210Scalar(src.data(), a.data(), width, height, 0, 0, 0, height, matrix, &sa);
+    for (auto const level : simdLevels())
+    {
+        CAPTURE(simdName(level));
+        CAPTURE(width);
+        std::vector<std::uint8_t> b(src.size(), 0x55), c(src.size(), 0x33);
+        ProcessStats sb;
+        processAt(level, src.data(), b.data(), width, height, 0, 0, 0, height, matrix, &sb);
+        processAt(level, src.data(), c.data(), width, height, 0, 0, 0, height, matrix, nullptr);
+        CHECK(std::memcmp(a.data(), b.data(), a.size()) == 0);
+        CHECK(std::memcmp(a.data(), c.data(), a.size()) == 0);
+        CHECK(sa.samples == sb.samples);
+        CHECK(sa.clipped == sb.clipped);
+    }
+}
+
+void checkSimdMatchesScalar(FixedMatrix const& matrix, int width, int height, std::uint32_t seed)
 {
     std::vector<std::uint8_t> src;
     fillAny(src, width, height, seed);
-    std::vector<std::uint8_t> a(src.size(), 0xAA), b(src.size(), 0x55);
-    ProcessStats sa, sb;
-    processV210Scalar(src.data(), a.data(), width, height, 0, 0, 0, height, matrix, &sa);
-    processV210Avx2(src.data(), b.data(), width, height, 0, 0, 0, height, matrix, &sb);
-    CHECK(std::memcmp(a.data(), b.data(), a.size()) == 0);
-    CHECK(sa.samples == sb.samples);
-    CHECK(sa.clipped == sb.clipped);
+    checkFrame(matrix, src, width, height);
 }
 
 } // namespace
 
-TEST_CASE("avx2 blocks match the scalar reference on every raster and clip mode")
+TEST_CASE("every SIMD level matches the scalar reference on every raster and clip mode")
 {
-    if (!cpuHasAvx2())
-    {
-        return;
-    }
     Controls strong;
     strong.gain = 180;
     strong.saturation = 190;
@@ -118,17 +168,13 @@ TEST_CASE("avx2 blocks match the scalar reference on every raster and clip mode"
         // 6 and 54: no block or one block plus a group; 1280 ends in a partial group.
         for (int width : {6, 54, 96, 1280, 1920})
         {
-            checkAvx2MatchesScalar(matrix, width, 4, ++seed);
+            checkSimdMatchesScalar(matrix, width, 4, ++seed);
         }
     }
 }
 
-TEST_CASE("avx2 gamut clip matches the scalar reference on in-gamut pictures")
+TEST_CASE("every SIMD level's gamut clip matches the scalar reference on in-gamut pictures")
 {
-    if (!cpuHasAvx2())
-    {
-        return;
-    }
     // Codes from RGB inside the cube (most blocks skip the exact test) and near its faces.
     int const width = 1920;
     int const height = 4;
@@ -160,23 +206,13 @@ TEST_CASE("avx2 gamut clip matches the scalar reference on in-gamut pictures")
             controls.rgbClip = true;
             controls.saturation = saturation;
             controls.gain = 101;
-            auto const matrix = buildMatrix(controls);
-            std::vector<std::uint8_t> a(src.size(), 0xAA), b(src.size(), 0x55);
-            ProcessStats sa, sb;
-            processV210Scalar(src.data(), a.data(), width, height, 0, 0, 0, height, matrix, &sa);
-            processV210Avx2(src.data(), b.data(), width, height, 0, 0, 0, height, matrix, &sb);
-            CHECK(std::memcmp(a.data(), b.data(), a.size()) == 0);
-            CHECK(sa.clipped == sb.clipped);
+            checkFrame(buildMatrix(controls), src, width, height);
         }
     }
 }
 
-TEST_CASE("avx2 row slices match the whole frame")
+TEST_CASE("every SIMD level's row slices match the whole frame")
 {
-    if (!cpuHasAvx2())
-    {
-        return;
-    }
     Controls controls;
     controls.gain = 150;
     controls.saturation = 130;
@@ -185,30 +221,30 @@ TEST_CASE("avx2 row slices match the whole frame")
     int const height = 9;
     std::vector<std::uint8_t> src;
     fillAny(src, width, height, 3);
-    std::vector<std::uint8_t> whole(src.size()), sliced(src.size());
-    processV210Avx2(src.data(), whole.data(), width, height, 0, 0, 0, height, matrix, nullptr);
-    for (int row = 0; row < height; row += 4)
+    for (auto const level : simdLevels())
     {
-        processV210Avx2(src.data(), sliced.data(), width, height, 0, 0, row, std::min(row + 4, height), matrix, nullptr);
+        CAPTURE(simdName(level));
+        std::vector<std::uint8_t> whole(src.size()), sliced(src.size());
+        processAt(level, src.data(), whole.data(), width, height, 0, 0, 0, height, matrix, nullptr);
+        for (int row = 0; row < height; row += 4)
+        {
+            processAt(level, src.data(), sliced.data(), width, height, 0, 0, row, std::min(row + 4, height), matrix, nullptr);
+        }
+        CHECK(std::memcmp(whole.data(), sliced.data(), whole.size()) == 0);
     }
-    CHECK(std::memcmp(whole.data(), sliced.data(), whole.size()) == 0);
 }
 
-TEST_CASE("avx2 stays exact for a matrix beyond 32-bit sums")
+TEST_CASE("every SIMD level stays exact for a matrix beyond 32-bit sums")
 {
-    if (!cpuHasAvx2())
-    {
-        return;
-    }
     Controls controls;
     controls.gain = 150;
     auto matrix = buildMatrix(controls);
     matrix.m[0][0] = 3'000'000; // 3e6 * 1023 does not fit an int32 lane
     matrix.m[1][2] = -2'500'000;
     matrix.identity = false;
-    checkAvx2MatchesScalar(matrix, 1920, 2, 11);
+    checkSimdMatchesScalar(matrix, 1920, 2, 11);
     matrix.rgbClip = true;
-    checkAvx2MatchesScalar(matrix, 1920, 2, 12);
+    checkSimdMatchesScalar(matrix, 1920, 2, 12);
 }
 
 TEST_CASE("v210 roundtrip is bit-exact")
@@ -236,10 +272,11 @@ TEST_CASE("neutral settings are bit-exact on random legal v210")
     std::vector<std::uint8_t> dst(src.size(), 0);
     processV210Scalar(src.data(), dst.data(), width, height, 0, 0, 0, height, matrix, nullptr);
     CHECK(std::memcmp(src.data(), dst.data(), src.size()) == 0);
-    if (cpuHasAvx2())
+    for (auto const level : simdLevels())
     {
+        CAPTURE(simdName(level));
         std::vector<std::uint8_t> dst2(src.size(), 0);
-        processV210Avx2(src.data(), dst2.data(), width, height, 0, 0, 0, height, matrix, nullptr);
+        processAt(level, src.data(), dst2.data(), width, height, 0, 0, 0, height, matrix, nullptr);
         CHECK(std::memcmp(src.data(), dst2.data(), src.size()) == 0);
     }
 }
@@ -320,12 +357,8 @@ TEST_CASE("each control stays within 1 LSB of the floating-point reference")
     CHECK(worst <= 1.0);
 }
 
-TEST_CASE("avx2 matches the scalar reference")
+TEST_CASE("every SIMD level matches the scalar reference on legal codes")
 {
-    if (!cpuHasAvx2())
-    {
-        return;
-    }
     Controls controls;
     controls.gain = 120;
     controls.pedestal = 3;
@@ -338,10 +371,7 @@ TEST_CASE("avx2 matches the scalar reference")
     int const height = 3;
     std::vector<std::uint8_t> src;
     fillLegal(src, width, height, 99);
-    std::vector<std::uint8_t> a(src.size()), b(src.size());
-    processV210Scalar(src.data(), a.data(), width, height, 0, 0, 0, height, matrix, nullptr);
-    processV210Avx2(src.data(), b.data(), width, height, 0, 0, 0, height, matrix, nullptr);
-    CHECK(std::memcmp(a.data(), b.data(), a.size()) == 0);
+    checkFrame(matrix, src, width, height);
 }
 
 TEST_CASE("gain moves white but not black")
@@ -622,7 +652,7 @@ TEST_CASE("trims, pedestal and brightness take -100 to +100 percent")
     CHECK_FALSE(validateControls(ratio).empty());
 }
 
-TEST_CASE("every corner of the widened ranges: no overflow, AVX2 exact, legal output, 1 LSB")
+TEST_CASE("every corner of the widened ranges: no overflow, SIMD exact, legal output, 1 LSB")
 {
     std::uint32_t seed = 99;
     int corners = 0;
@@ -653,9 +683,9 @@ TEST_CASE("every corner of the widened ranges: no overflow, AVX2 exact, legal ou
                             std::int64_t const bound = (std::llabs(row[0]) + std::llabs(row[1]) + std::llabs(row[2])) * 1023 + std::llabs(row[3]) + 32768;
                             CHECK(bound < 2147483647LL);
                         }
-                        if (cpuHasAvx2() && corners % 8 == 0)
+                        if (corners % 8 == 0)
                         {
-                            checkAvx2MatchesScalar(matrix, 96, 2, ++seed);
+                            checkSimdMatchesScalar(matrix, 96, 2, ++seed);
                         }
                         Controls open = controls;
                         open.clip = ClipMode::Off;
@@ -750,4 +780,224 @@ TEST_CASE("the wheel and the RGB trims describe the same parameters")
     CHECK(std::hypot(ix, iy) < 1);
     CHECK(std::atan2(y, x) == doctest::Approx(std::atan2(iy, ix)));
     CHECK(x > 0); // red is +x
+}
+
+TEST_CASE("SIMD levels under test")
+{
+    std::string names = "scalar";
+    for (auto const level : simdLevels())
+    {
+        names += std::string(" ") + simdName(level);
+    }
+    MESSAGE("SIMD levels tested: " << names);
+    // CI runs the tests under Intel SDE with this set: a missing AVX-512 fails instead of skipping.
+    if (std::getenv("CC_TEST_REQUIRE_AVX512") != nullptr)
+    {
+        REQUIRE(cpuHasAvx512());
+    }
+}
+
+namespace
+{
+std::vector<FixedMatrix> simdMatrices()
+{
+    Controls strong;
+    strong.gain = 180;
+    strong.saturation = 190;
+    strong.pedestal = 6;
+    strong.white = {12, -8, 4};
+    Controls dark;
+    dark.gain = 60;
+    dark.brightness = -15;
+    dark.black = {-3, 2, 1};
+    dark.clip = ClipMode::Extended;
+    Controls open;
+    open.gain = 120;
+    open.saturation = 40;
+    open.whiteWheelX = 0.4;
+    open.blackWheelY = -0.3;
+    open.clip = ClipMode::Off;
+    Controls gamut = strong;
+    gamut.rgbClip = true;
+    Controls gamutOpen = open;
+    gamutOpen.rgbClip = true;
+    Controls gamutMild;
+    gamutMild.gain = 101;
+    gamutMild.saturation = 110;
+    gamutMild.rgbClip = true;
+    std::vector<FixedMatrix> matrices;
+    for (Controls const& controls : {strong, dark, open, gamut, gamutOpen, gamutMild})
+    {
+        matrices.push_back(buildMatrix(controls));
+    }
+    return matrices;
+}
+} // namespace
+
+TEST_CASE("every SIMD level on every width: 16- and 8-group blocks, partial groups, tails")
+{
+    // 144 = 16 + 8 groups and 720 = 7 · 16 + 8: the AVX-512 code adds one 8-group block; 1283 and 1917
+    // end in a partial group; 1280, 1920 and 3840 are the rasters.
+    std::uint32_t seed = 300;
+    for (auto const& matrix : simdMatrices())
+    {
+        for (int width : {6, 12, 42, 48, 54, 90, 96, 102, 138, 144, 150, 186, 192, 198, 720, 1280, 1283, 1916, 1917, 1920, 3840})
+        {
+            checkSimdMatchesScalar(matrix, width, 3, ++seed);
+        }
+    }
+}
+
+TEST_CASE("every SIMD level on edge codes and on set padding bits")
+{
+    int const width = 1920;
+    int const height = 4;
+    int const stride = v210Stride(width);
+    // The clip limits of every mode, the container ends and the chroma centre, in every combination
+    // the row offsets give.
+    std::vector<std::uint16_t> const codes = {0, 1, 3, 4, 5, 63, 64, 65, 511, 512, 513, 939, 940, 941, 959, 960, 961, 1018, 1019, 1020, 1023};
+    auto const n = codes.size();
+    std::vector<std::uint8_t> edges(static_cast<std::size_t>(stride * height), 0);
+    std::vector<std::uint16_t> y(static_cast<std::size_t>(width));
+    std::vector<std::uint16_t> cb(static_cast<std::size_t>(width / 2));
+    std::vector<std::uint16_t> cr(static_cast<std::size_t>(width / 2));
+    for (int row = 0; row < height; ++row)
+    {
+        for (int x = 0; x < width; ++x)
+        {
+            y[static_cast<std::size_t>(x)] = codes[static_cast<std::size_t>(x + row) % n];
+        }
+        for (int x = 0; x < width / 2; ++x)
+        {
+            cb[static_cast<std::size_t>(x)] = codes[static_cast<std::size_t>(x / n + row * 5) % n];
+            cr[static_cast<std::size_t>(x)] = codes[static_cast<std::size_t>(x * 7 + row) % n];
+        }
+        packV210Line(edges.data() + static_cast<std::size_t>(row * stride), width, stride, y.data(), cb.data(), cr.data());
+    }
+    // Random words: bits 30 and 31 are set too, which the unpack ignores.
+    std::vector<std::uint8_t> words(edges.size());
+    std::uint32_t seed = 77;
+    for (auto& byte : words)
+    {
+        byte = static_cast<std::uint8_t>(lcg(seed) >> 24);
+    }
+    auto matrices = simdMatrices();
+    Controls neutral;
+    neutral.rgbClip = true;
+    matrices.push_back(buildMatrix(neutral));
+    matrices.push_back(buildMatrix(Controls{}));
+    for (auto const& matrix : matrices)
+    {
+        checkFrame(matrix, edges, width, height);
+        checkFrame(matrix, words, width, height);
+    }
+}
+
+TEST_CASE("every SIMD level with padded strides writes the same bytes, padding included")
+{
+    Controls controls;
+    controls.gain = 130;
+    controls.saturation = 150;
+    controls.rgbClip = true;
+    for (bool const rgb : {false, true})
+    {
+        controls.rgbClip = rgb;
+        auto const matrix = buildMatrix(controls);
+        int const width = 1280;
+        int const height = 3;
+        int const stride = v210Stride(width) + 256;
+        std::vector<std::uint8_t> src(static_cast<std::size_t>(stride * height));
+        std::uint32_t seed = 5;
+        for (auto& byte : src)
+        {
+            byte = static_cast<std::uint8_t>(lcg(seed) >> 24);
+        }
+        std::vector<std::uint8_t> a(src.size(), 0xAA);
+        ProcessStats sa;
+        processV210Scalar(src.data(), a.data(), width, height, stride, stride, 0, height, matrix, &sa);
+        for (auto const level : simdLevels())
+        {
+            CAPTURE(simdName(level));
+            std::vector<std::uint8_t> b(src.size(), 0x55);
+            ProcessStats sb;
+            processAt(level, src.data(), b.data(), width, height, stride, stride, 0, height, matrix, &sb);
+            CHECK(std::memcmp(a.data(), b.data(), a.size()) == 0);
+            CHECK(sa.clipped == sb.clipped);
+            CHECK(sa.samples == sb.samples);
+        }
+    }
+}
+
+TEST_CASE("processV210 runs the level that is set")
+{
+    Controls controls;
+    controls.gain = 140;
+    controls.rgbClip = true;
+    auto const matrix = buildMatrix(controls);
+    int const width = 1920;
+    int const height = 2;
+    std::vector<std::uint8_t> src;
+    fillAny(src, width, height, 8);
+    std::vector<std::uint8_t> a(src.size());
+    processV210Scalar(src.data(), a.data(), width, height, 0, 0, 0, height, matrix, nullptr);
+    auto levels = simdLevels();
+    levels.push_back(SimdLevel::Scalar);
+    for (auto const level : levels)
+    {
+        CAPTURE(simdName(level));
+        setSimdLevel(level);
+        CHECK(simdLevel() == level);
+        std::vector<std::uint8_t> b(src.size());
+        processV210(src.data(), b.data(), width, height, 0, 0, 0, height, matrix, nullptr);
+        CHECK(std::memcmp(a.data(), b.data(), a.size()) == 0);
+    }
+    setSimdLevel(autoSimdLevel(detectCpuSimd()));
+}
+
+TEST_CASE("CC_SIMD: the request, the CPU's levels and the fallback")
+{
+    for (char const* text : {"auto", "avx512", "avx512vl", "avx2", "scalar"})
+    {
+        CHECK(validSimdRequest(text));
+    }
+    for (char const* text : {"", "AVX2", "sse2", "avx512bw", "on"})
+    {
+        CHECK_FALSE(validSimdRequest(text));
+    }
+    CpuSimd none;
+    CpuSimd avx2;
+    avx2.avx2 = true;
+    CpuSimd skx = avx2;
+    skx.avx512 = true;
+    skx.family = "skylake-sp";
+    CHECK(chooseSimd("auto", none).level == SimdLevel::Scalar);
+    CHECK(chooseSimd("auto", avx2).level == SimdLevel::Avx2);
+    CHECK(chooseSimd("", avx2).requested == "auto");
+    auto const down = chooseSimd("avx512", avx2);
+    CHECK(down.level == SimdLevel::Avx2);
+    CHECK_FALSE(down.warning.empty());
+    CHECK(chooseSimd("avx2", none).level == SimdLevel::Scalar);
+    CHECK(chooseSimd("avx512vl", skx).level == SimdLevel::Avx512Vl);
+    CHECK(chooseSimd("avx512", skx).level == SimdLevel::Avx512);
+    CHECK(chooseSimd("avx512", skx).warning.empty());
+    CHECK(chooseSimd("scalar", skx).level == SimdLevel::Scalar);
+    CHECK(std::string(simdName(SimdLevel::Avx512Vl)) == "avx512vl");
+}
+
+TEST_CASE("auto per CPU family: AVX2 on Skylake-SP, AVX-512 from Ice Lake and Zen 4 on")
+{
+    CpuSimd cpu;
+    cpu.avx2 = true;
+    CHECK(autoSimdLevel(cpu) == SimdLevel::Avx2);
+    cpu.avx512 = true;
+    for (char const* family : {"skylake-sp", "other"})
+    {
+        cpu.family = family;
+        CHECK(autoSimdLevel(cpu) == SimdLevel::Avx2);
+    }
+    for (char const* family : {"icelake+", "zen4", "zen5"})
+    {
+        cpu.family = family;
+        CHECK(autoSimdLevel(cpu) == SimdLevel::Avx512);
+    }
 }
