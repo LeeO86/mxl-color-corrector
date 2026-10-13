@@ -9,6 +9,10 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+      - name: runner CPU
+        run: |
+          lscpu | grep -E '^(Model name|Vendor ID|CPU family|Model):'
+          echo "AVX-512 flags: $(grep -m1 -o -w 'avx512[a-z_0-9]*' /proc/cpuinfo | sort -u | xargs)"
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -44,3 +48,40 @@ jobs:
         run: python3 tests/integration/lifecycle.py
         env:
           CC_BUILD: build
+
+  # The AVX-512 code under Intel SDE (Software Development Emulator), because a hosted runner may have
+  # no AVX-512 (EPYC 7763). SDE emulates the chip's cpuid and stops on an instruction the chip does
+  # not have: hsw (AVX2) shows that no AVX-512 instruction runs outside the AVX-512 code, skx
+  # (Skylake-SP) and icx (Ice Lake server) run every level against the scalar reference.
+  # SDE: Intel Simplified Software License, downloaded per run (checked SHA-256) by setup-sde.
+  sde:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        chip: [hsw, skx, icx]
+    steps:
+      - uses: actions/checkout@v4
+      - name: runner CPU
+        run: |
+          lscpu | grep -E '^(Model name|Vendor ID|CPU family|Model):'
+          echo "AVX-512 flags: $(grep -m1 -o -w 'avx512[a-z_0-9]*' /proc/cpuinfo | sort -u | xargs)"
+      - name: packages
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends build-essential cmake ninja-build g++
+      - name: build
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCC_WITH_MXL=OFF
+          cmake --build build --target unit-tests mxl-cc-bench
+      - name: Intel SDE
+        uses: petarpetrovt/setup-sde@6d2773bc0ef3005fd52e0ae0bb91782321793aec # v6.0
+        with:
+          environmentVariableName: SDE_PATH
+          sdeVersion: 10.13.1
+      - name: CPU and auto level under SDE
+        run: $SDE_PATH/sde64 -${{ matrix.chip }} -- ./build/mxl-cc-bench cpu
+      - name: unit tests under SDE
+        run: |
+          if [ "${{ matrix.chip }}" != hsw ]; then export CC_TEST_REQUIRE_AVX512=1; fi
+          $SDE_PATH/sde64 -${{ matrix.chip }} -- ./build/unit-tests
