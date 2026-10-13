@@ -69,7 +69,8 @@ repo is MIT).
 - MXL `release/v1.1` at `218ddaa` (platform pin), Fabrics OFF; nmos-cpp at the
   siblings' commit.
 - CPU only. The inner loop works on v210 (10-bit 4:2:2) words directly, with SIMD
-  (AVX2, with a scalar reference path used in tests). No GPU required.
+  (AVX2, AVX-512VL and AVX-512 chosen at run time by `CC_SIMD`, with a scalar reference path
+  used in tests). No GPU required.
 - Web UI: Vue 3 SPA embedded, no CDN.
 - Tests: doctest (vendored), shell integration tests.
 - Follow the real MXL API for slice reading and partial commits (the fabrics agent's
@@ -282,6 +283,7 @@ Env > JSON file (`CC_CONFIG_FILE`) > defaults; invalid configuration exits 78.
 | `WEB_PORT` | 8140 |
 | `CC_STATE_DIR` | `/config` |
 | `CC_PREVIEW_FPS` | 4 |
+| `CC_SIMD` | `auto` (`avx512`, `avx512vl`, `avx2`, `scalar`; see the README) |
 | `SHUTDOWN_TIMEOUT_S` | 10 |
 | `WIDGET_FRAME_ANCESTORS` | `'self'` (§7.1) |
 | `CC_LOG_LEVEL` | `info` |

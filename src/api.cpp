@@ -181,7 +181,7 @@ Json widgetsJson(int channels)
     return list;
 }
 
-// /widgets and /widget/<id>?channel=<n>[&theme=dark|light|transparent] (SPECIFICATION.md Â§7.1). GET only;
+// /widgets and /widget/<id>?channel=<n>[&theme=dark|light|transparent] (SPECIFICATION.md §7.1). GET only;
 // no API CORS: the list answers the WIDGET_FRAME_ANCESTORS origins, the pages carry the CSP frame-ancestors.
 void serveWidget(Services const& services, HttpRequest const& req, std::string const& path, HttpResponse& res)
 {

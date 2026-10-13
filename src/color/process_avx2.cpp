@@ -228,7 +228,7 @@ struct Avx2
         v = _mm_add_epi32(v, _mm_shuffle_epi32(v, 0xb1));
         return static_cast<std::uint32_t>(_mm_cvtsi128_si32(v));
     }
-    // 4Ãƒâ€”4 transpose of 32-bit words within each 128-bit lane. Its own inverse.
+    // 4×4 transpose of 32-bit words within each 128-bit lane. Its own inverse.
     CC_KERNEL static void transpose(I& a, I& b, I& c, I& d)
     {
         I const t0 = _mm256_unpacklo_epi32(a, b);

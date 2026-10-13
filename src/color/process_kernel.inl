@@ -9,7 +9,7 @@
 //
 // Bit-exact with the scalar reference (correctSample):
 // - the rows are the same 32-bit sums (fits32), only added in another order: the pair's shared part
-//   m1Ã‚Â·Cb + m2Ã‚Â·Cr + m3 first, then m0Ã‚Â·Y per sample (wrapping sums do not depend on the order);
+//   m1·Cb + m2·Cr + m3 first, then m0·Y per sample (wrapping sums do not depend on the order);
 // - the gamut clip repeats the double-precision operations in the same order (no FMA);
 // - a pixel counts as clipped when its Y or its own chroma (computed with its Y, also for the odd
 //   samples whose chroma is not written) leaves the clip limits, or the gamut clip moved it.
@@ -80,7 +80,7 @@ struct Pair
     typename V::I ye, yo, cb, cr;
 };
 
-// The part of each row that both samples of a pair share: m1Ã‚Â·Cb + m2Ã‚Â·Cr + m3 + 32768.
+// The part of each row that both samples of a pair share: m1·Cb + m2·Cr + m3 + 32768.
 template <class V>
 struct Shared
 {
@@ -94,7 +94,7 @@ CC_INLINE Shared<V> shared(Coeffs<V> const& k, typename V::I cb, typename V::I c
         V::add(V::add(V::mul(cb, k.m21), V::mul(cr, k.m22)), k.b2)};
 }
 
-// (shared + m0Ã‚Â·Y) >> 16 with an arithmetic shift, as roundShift.
+// (shared + m0·Y) >> 16 with an arithmetic shift, as roundShift.
 template <class V>
 CC_INLINE typename V::I rowValue(typename V::I part, typename V::I y, typename V::I m0)
 {
@@ -200,7 +200,7 @@ CC_KERNEL typename V::M rgbClip(typename V::I& Y, typename V::I& Cb, typename V:
 // True when every lane is clearly inside the RGB cube, so rgbClip would leave it alone: codes in
 // the legal ranges, and R, G, B from 20-bit fixed-point coefficients at least 2^-10 inside [0, 1].
 // Within those ranges the coefficients' rounding moves R, G and B by at most
-// 0.5 Ã‚Â· (876 + 448 + 448) Ã‚Â· 2^-20, less than the margin.
+// 0.5 · (876 + 448 + 448) · 2^-20, less than the margin.
 template <class V>
 CC_INLINE bool clearlyInside(typename V::I Y, typename V::I Cb, typename V::I Cr)
 {

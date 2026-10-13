@@ -7,7 +7,7 @@
 namespace cc
 {
 
-// Fixed-point 3Ã—4 matrix in the Yâ€²CbCr code domain.
+// Fixed-point 3×4 matrix in the Y′CbCr code domain.
 // out = (m0*Y + m1*Cb + m2*Cr + m3 + 32768) >> 16
 // Coefficients are in 1/65536 units. identity is exact when the controls are neutral.
 struct FixedMatrix
