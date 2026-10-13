@@ -1,6 +1,6 @@
 # Performance
 
-## Unreleased: AVX-512 levels (`CC_SIMD`) and cheaper clip statistics
+## 1.2.0: AVX-512 levels (`CC_SIMD`) and cheaper clip statistics
 
 Measured 2026-10-13 on the lab's 2× Xeon Gold 6136 (Skylake-SP, 2 FMA units, TSC 3.0 GHz), GCC 13.3 `-O3`, no `-march`. Lab scripts and raw numbers: `~/mxl-lab/simd/g3/` (`G3-COMMANDS.txt`, `results-20261013.txt`). Clock = 3.0 GHz × cycles / ref-cycles; licence = share of cycles in `core_power.lvl{0,1,2}_turbo_license`.
 
