@@ -110,6 +110,15 @@ SimdLevel autoSimdLevel(CpuSimd const& cpu)
     {
         return SimdLevel::Scalar;
     }
+    // AVX-512 is the auto choice only where it saves at least 15 % of the process's CPU and costs a
+    // workload on the same core less than 3 % (docs/performance.md, "AVX-512"). Skylake-SP class:
+    // 512-bit code drops the core into the lowest frequency licence, which slows the other
+    // hyperthread by 4–7 % (measured), and 256-bit AVX-512 saves too little. Ice Lake and later,
+    // Zen 4 and Zen 5 keep their clock with AVX-512 (published; not measured here).
+    if (cpu.avx512 && (cpu.family == "icelake+" || cpu.family == "zen4" || cpu.family == "zen5"))
+    {
+        return SimdLevel::Avx512;
+    }
     return SimdLevel::Avx2;
 }
 

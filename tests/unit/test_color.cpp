@@ -983,3 +983,21 @@ TEST_CASE("CC_SIMD: the request, the CPU's levels and the fallback")
     CHECK(chooseSimd("scalar", skx).level == SimdLevel::Scalar);
     CHECK(std::string(simdName(SimdLevel::Avx512Vl)) == "avx512vl");
 }
+
+TEST_CASE("auto per CPU family: AVX2 on Skylake-SP, AVX-512 from Ice Lake and Zen 4 on")
+{
+    CpuSimd cpu;
+    cpu.avx2 = true;
+    CHECK(autoSimdLevel(cpu) == SimdLevel::Avx2);
+    cpu.avx512 = true;
+    for (char const* family : {"skylake-sp", "other"})
+    {
+        cpu.family = family;
+        CHECK(autoSimdLevel(cpu) == SimdLevel::Avx2);
+    }
+    for (char const* family : {"icelake+", "zen4", "zen5"})
+    {
+        cpu.family = family;
+        CHECK(autoSimdLevel(cpu) == SimdLevel::Avx512);
+    }
+}

@@ -74,6 +74,9 @@ jobs:
         run: |
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCC_WITH_MXL=OFF
           cmake --build build --target unit-tests mxl-cc-bench
+      # Hosted runners differ (EPYC 7763, Zen 5, Xeon with AVX-512): every level on this one, natively.
+      - name: levels on this runner (native)
+        run: ./build/mxl-cc-bench table
       - name: Intel SDE
         uses: petarpetrovt/setup-sde@6d2773bc0ef3005fd52e0ae0bb91782321793aec # v6.0
         with:

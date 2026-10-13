@@ -6,6 +6,8 @@
 //     at 1080p with the statistics on, as the engine runs.
 //   mxl-cc-bench cpu
 //     only the first line: what the CPU offers and the auto level.
+//   mxl-cc-bench table
+//     the first line and the table of every level.
 //   mxl-cc-bench run <level> <matrix|rgb> <bench|camera> <height> <frames> <stats on|off> <seconds> [fps]
 //     one case; level auto|scalar|avx2|avx512vl|avx512; frames > 1 rotates through that many
 //     different frames (8 × 5.5 MB is more than the L3 cache: a new grain per call, as in production);
@@ -217,14 +219,19 @@ int main(int argc, char** argv)
         int fps;
         int frames;
     };
-    Case cases[] = {{"1080p50", 1920, 1080, 50, 20}, {"2160p50", 3840, 2160, 50, 8}};
     std::cout << "avx2 " << (cpu.avx2 ? "yes" : "no") << " avx512 " << (cpu.avx512 ? "yes" : "no") << " family " << (cpu.family.empty() ? "-" : cpu.family)
               << " auto " << cc::simdName(cc::autoSimdLevel(cpu)) << "\n";
     if (argc >= 2 && std::string(argv[1]) == "cpu")
     {
         return 0;
     }
-    std::cout << "level "<< cc::simdName(cc::simdLevel()) << "\n";
+    // The dispatched level at 1080p50 and 2160p50 (the CI compares this part with main).
+    std::vector<Case> cases;
+    if (!(argc >= 2 && std::string(argv[1]) == "table"))
+    {
+        std::cout << "level " << cc::simdName(cc::simdLevel()) << "\n";
+        cases = {{"1080p50", 1920, 1080, 50, 20}, {"2160p50", 3840, 2160, 50, 8}};
+    }
     for (auto const& item : cases)
     {
         double fast = seconds(item.w, item.h, plain, item.frames);
