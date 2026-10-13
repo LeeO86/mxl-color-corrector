@@ -1,4 +1,5 @@
 #include "api.hpp"
+#include "color/simd.hpp"
 #include "config.hpp"
 #include "engine.hpp"
 #include "http.hpp"
@@ -62,6 +63,15 @@ int main()
     }
     cc::setLogLevel(config.logLevel);
     cc::logInfo(std::string("mxl-color-corrector ") + cc::kVersion + " channels " + std::to_string(config.channels));
+    auto const cpu = cc::detectCpuSimd();
+    auto const simd = cc::chooseSimd(config.simd, cpu);
+    cc::setSimdLevel(simd.level);
+    if (!simd.warning.empty())
+    {
+        cc::logWarn(simd.warning);
+    }
+    std::string const offered = cpu.avx512 ? "avx512 (" + cpu.family + ")" : cpu.avx2 ? "avx2" : "scalar";
+    cc::logInfo(std::string("simd ") + cc::simdName(simd.level) + " (CC_SIMD=" + simd.requested + ", cpu " + offered + ")");
     cc::ControlStore store(config);
     cc::RuntimeBoard runtime(config.channels);
     cc::NmosNode nmos(config);
