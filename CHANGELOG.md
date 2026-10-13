@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- **AVX-512 at run time.** The colour processing has AVX-512 code on 512-bit registers (`avx512`) and on 256-bit registers (`avx512vl`) next to AVX2 and the scalar reference, chosen at start from cpuid and the OS's saved register state; the image stays plain x86-64. New setting `CC_SIMD` (`auto`, `avx512`, `avx512vl`, `avx2`, `scalar`; default `auto`): `avx512` on Ice Lake and later Xeons, Zen 4 and Zen 5, `avx2` on Skylake-SP and Cascade Lake (the 512-bit frequency licence slows the core's other hyperthread by 3.4–4 %) and on CPUs without AVX-512. A level the CPU lacks falls back with a warning. The level is in the start log, in the status (`simd`) and in the metric `mxl_color_corrector_simd_level{level}`. Every level is bit-exact with the scalar path, clip statistics included (unit tests on every width, edge codes, padding bits and strides; in CI also under Intel SDE as Haswell, Skylake-SP and Ice Lake).
+- **Less CPU on every level.** The clip statistics (the clipped-samples ratio) cost the AVX2 path a third of its time: the odd sample's chroma rows were computed again in full. Now the rows share the chroma pair's part, the odd chroma is computed only for the count, and the count is a lane counter per line (a mask popcount with AVX-512); the scalar path counts per line instead of per pixel through a pointer. The gamut clip's inside test uses 16-bit multiplies. Lab Xeon Gold 6136, 2 × 1080p50 bars: 0.199 → 0.166 cores per channel with RGB gamut clip off and 0.841 → 0.725 with it on (`avx2`); `avx512` there: 0.135 and 0.435. Numbers per CPU in `docs/performance.md`.
+- `mxl-cc-bench` measures one case per call (`run <level> <matrix|rgb> <camera|bench> <height> <frames> <stats> <seconds> [fps]`) and prints every level this CPU has (`table`).
+
 ## 1.1.1
 
 - The image's `org.opencontainers.image.version` label is the release version (1.1.0 showed `24.04`, inherited from the Ubuntu base image); untagged builds carry `git-<sha>`. No code change.

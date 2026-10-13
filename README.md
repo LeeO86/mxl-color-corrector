@@ -109,10 +109,10 @@ On the lab's Xeon Gold 6136 (Skylake-SP), 2 channels of 1080p50 test-player bars
 
 | RGB gamut clip | 1.1.1 | `avx2` | `avx512vl` | `avx512` |
 | --- | --- | --- | --- | --- |
-| off | 0.21 | 0.166 | 0.155 | 0.135 |
-| on | 0.83 | 0.725 | 0.583 | 0.435 |
+| off | 0.199 | 0.166 | 0.155 | 0.135 |
+| on | 0.841 | 0.725 | 0.583 | 0.435 |
 
-`avx512` saves 19 % (off) and 40 % (on) there, but it costs a workload on the same core's other hyperthread 4–7 %; set it on Skylake-SP hosts whose cores are not shared, or `avx512vl` (−20 % with RGB gamut clip, no measurable cost to the neighbour). Details and the per-CPU numbers: [docs/performance.md](docs/performance.md).
+`avx512` saves 19 % (off) and 40 % (on) there, but it costs a workload on the same core's other hyperthread 3.4–4 % against `avx2` (the rule for `auto` allows less than 3 %). Set it on Skylake-SP hosts whose cores are not shared; `avx512vl` saves 20 % with RGB gamut clip on bars-like pictures (about 8 % on camera pictures) and costs the neighbour nothing. Details and the per-CPU numbers: [docs/performance.md](docs/performance.md).
 
 ## Controls
 
