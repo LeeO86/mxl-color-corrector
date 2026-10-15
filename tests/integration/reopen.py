@@ -4,7 +4,9 @@
 A paced pattern writer feeds channel 1. It stops (MXL deletes the flow with its last writer) and
 starts again: once at once and once after a 1 s gap. Each time the channel must read the new
 flow again within 1 s, without an IS-05 activation, count one re-open, and keep its output flow
-going meanwhile (state holding, the output head advancing).
+going meanwhile (state holding, the output head advancing). Twice: with slice commits (slice
+mode) and with whole grains (whole-grain mode, which reads one grain behind the head and so
+starts before the new flow's first grain).
 """
 
 import json
@@ -18,7 +20,9 @@ import urllib.request
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 BUILD = os.environ.get("CC_BUILD", os.path.join(ROOT, "build"))
-BASE = os.environ.get("CC_TMP", "/tmp/mxl-cc-reopen-it")
+ROOT_TMP = os.environ.get("CC_TMP", "/tmp/mxl-cc-reopen-it")
+BASE = ROOT_TMP
+SLICE_LINES = "36"
 DOMAIN = "77777777-7777-4777-8777-777777777777"
 FLOW = "88888888-8888-4888-8888-888888888888"
 WEB = int(os.environ.get("CC_WEB_PORT", "18144"))
@@ -56,7 +60,7 @@ def writer(seconds):
             "--width", "640",
             "--height", "360",
             "--rate", "50",
-            "--slices", "36",
+            "--slices", SLICE_LINES,
             "--sleep-us", "200",
             "--paced", "1",
             "--seconds", str(seconds),
@@ -86,6 +90,14 @@ def wait_until(what, pred, seconds):
 
 
 def main():
+    global BASE, SLICE_LINES
+    for mode, lines in (("running", "36"), ("whole_grain", "360")):
+        BASE = os.path.join(ROOT_TMP, mode)
+        SLICE_LINES = lines
+        run(mode)
+
+
+def run(mode):
     os.makedirs(os.path.join(BASE, "config"), exist_ok=True)
     log_path = os.path.join(BASE, "cc.log")
     env = os.environ.copy()
@@ -122,6 +134,7 @@ def main():
             port=NMOS,
         )
         wait_until("grains", lambda: (metric("grains_processed_total") or 0) > 20, 10)
+        wait_until(mode, lambda: channel()["state"] == mode, 2)
         out_flow = channel()["output_flow"]
         results = {}
 
@@ -147,7 +160,7 @@ def main():
         base = metric("grains_processed_total")
         results["after_gap"] = wait_until("grains after the gap", lambda: metric("grains_processed_total") > base + 2, RESUME_S + 1)
         wait_until("two re-opens", lambda: metric("flow_reopens_total") == 2, 2)
-        wait_until("running", lambda: channel()["state"] == "running", 1)
+        wait_until(mode, lambda: channel()["state"] == mode, 1)
         h2 = output_head(out_flow)
         if h2 is None or h2 <= h1:
             raise SystemExit(f"output did not continue after the re-open: {h1} -> {h2}")
@@ -161,7 +174,7 @@ def main():
         for name, seconds in results.items():
             if seconds > RESUME_S:
                 raise SystemExit(f"{name}: grains came back after {seconds:.2f} s, more than {RESUME_S} s")
-        print("reopen ok", {k: round(v, 3) for k, v in results.items()}, "held output", h0, "->", h1)
+        print("reopen ok", mode, {k: round(v, 3) for k, v in results.items()}, "held output", h0, "->", h1)
         print("\n".join(line for line in text.splitlines() if "mxl_flow" in line))
     finally:
         for proc in procs:

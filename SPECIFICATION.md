@@ -208,6 +208,9 @@ reader still holds the old file; its head stands, and a read past it returns
   grain rate (state `holding`), and the first grain of the new flow follows the held ones
   (the output index never goes back). A re-created flow with another format mints a new
   output flow id (§6).
+- A grain that is still too early while the head is past it (left unfinished, or never written:
+  a re-created flow starts at its own head, and whole-grain mode reads one grain behind it) is
+  skipped instead of waited for.
 - Each channel reads on an MXL instance of its own. MXL gives the same reader back for a flow
   id while anyone holds it on that instance (`Instance.cpp:121-143`), so a channel re-opening
   a flow that another channel also reads would get the stale reader back on a shared instance.

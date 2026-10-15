@@ -702,6 +702,29 @@ struct Engine::Impl
                 return true;
             };
 
+            // A grain still too early while the head is past it will never come: the writer left it
+            // unfinished, or never wrote it (a re-created flow starts at its own head, so the
+            // whole-grain offset or the held output can point before its first grain). Skip it
+            // rather than wait until the head is half a ring ahead.
+            auto skipHole = [&](std::uint16_t want) {
+                mxlFlowRuntimeInfo now{};
+                if (mxlFlowReaderGetRuntimeInfo(reader, &now) != MXL_STATUS_OK || now.headIndex == MXL_UNDEFINED_INDEX || now.headIndex <= index) return;
+                // The grain may have been finished just before the head moved on: read it once more.
+                mxlGrainInfo again{};
+                std::uint8_t* payload = nullptr;
+                auto const status = want > 0 ? mxlFlowReaderGetGrainSliceNonBlocking(reader, index, want, &again, &payload)
+                                             : mxlFlowReaderGetGrainNonBlocking(reader, index, &again, &payload);
+                if (status != MXL_ERR_OUT_OF_RANGE_TOO_EARLY) return;
+                if (outOpen)
+                {
+                    mxlFlowWriterCancelGrain(writer);
+                    outOpen = false;
+                }
+                produced = 0;
+                grainCpu = 0;
+                ++index;
+            };
+
             if (decision.slice)
             {
                 std::uint16_t want = static_cast<std::uint16_t>(std::max(1, produced + 1));
@@ -710,6 +733,7 @@ struct Engine::Impl
                 auto status = mxlFlowReaderGetGrainSlice(reader, index, want, 2000000, &grain, &payload);
                 if (status == MXL_ERR_OUT_OF_RANGE_TOO_EARLY || status == MXL_ERR_TIMEOUT || status == MXL_ERR_NOT_READY)
                 {
+                    skipHole(want);
                     continue;
                 }
                 if (status == MXL_ERR_OUT_OF_RANGE_TOO_LATE)
@@ -761,6 +785,7 @@ struct Engine::Impl
                 auto status = mxlFlowReaderGetGrain(reader, index, 5000000, &grain, &payload);
                 if (status == MXL_ERR_OUT_OF_RANGE_TOO_EARLY || status == MXL_ERR_TIMEOUT || status == MXL_ERR_NOT_READY)
                 {
+                    skipHole(0);
                     continue;
                 }
                 if (status == MXL_ERR_OUT_OF_RANGE_TOO_LATE)
