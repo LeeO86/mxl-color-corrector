@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
     tags: ["v*.*.*"]
+  # A git-<sha> image of any branch, e.g. for a lab test of a pull request.
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -33,8 +35,11 @@ jobs:
             minor="${ver%.*}"
             echo "list=${image}:${ver},${image}:${minor},${image}:${major}" >> "$GITHUB_OUTPUT"
             echo "version=${ver}" >> "$GITHUB_OUTPUT"
-          else
+          elif [[ "${GITHUB_REF}" == refs/heads/main ]]; then
             echo "list=${image}:git-${sha7},${image}:nightly-dev" >> "$GITHUB_OUTPUT"
+            echo "version=git-${sha7}" >> "$GITHUB_OUTPUT"
+          else
+            echo "list=${image}:git-${sha7}" >> "$GITHUB_OUTPUT"
             echo "version=git-${sha7}" >> "$GITHUB_OUTPUT"
           fi
       - uses: docker/build-push-action@v6

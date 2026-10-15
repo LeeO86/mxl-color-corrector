@@ -73,8 +73,8 @@ export function download(name, text, type = "application/json") {
 }
 
 /** Channel states (§5.1) as words, and their pill colour. */
-export const STATE_TEXT = { running: "running", whole_grain: "whole grain", waiting: "waiting" };
-export const stateKind = (state) => ({ running: "ok", whole_grain: "warn" })[state] || "neutral";
+export const STATE_TEXT = { running: "running", whole_grain: "whole grain", holding: "holding", no_signal: "no signal", waiting: "waiting" };
+export const stateKind = (state) => ({ running: "ok", whole_grain: "warn", holding: "warn", no_signal: "bad" })[state] || "neutral";
 const REASON_TEXT = { interlaced: "interlaced input", no_slice_commits: "no slice commits", slice_layout: "slice layout" };
 /** Slice mode, or why the channel processes whole grains. */
 export const modeText = (c) => (c.slice_mode ? "slice by slice" : REASON_TEXT[c.fallback_reason] || "whole grain");

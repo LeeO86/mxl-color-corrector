@@ -1,7 +1,9 @@
 #include "engine.hpp"
 
 #include "color/process.hpp"
+#include "hold.hpp"
 #include "mode.hpp"
+#include "mxl_source.hpp"
 #include "preview.hpp"
 #include "util/json.hpp"
 #include "util/log.hpp"
@@ -21,6 +23,7 @@
 #include <fstream>
 #include <map>
 #include <mutex>
+#include <sys/stat.h>
 #include <sstream>
 #include <thread>
 #include <vector>
@@ -116,6 +119,8 @@ bool isBt709(std::string const& colorspace)
     return text.empty() || text.find("709") != std::string::npos;
 }
 
+// This function's own output domain, and the domain scan. Sources are read on an MXL instance of
+// each channel's own (SourceReader).
 class DomainCache
 {
 public:
@@ -125,17 +130,6 @@ public:
         {
             if (instance) mxlDestroyInstance(instance);
         }
-    }
-
-    mxlInstance openReadOnly(std::string const& dir)
-    {
-        std::lock_guard lock(mu_);
-        if (auto it = open_.find(dir); it != open_.end()) return it->second;
-        if (!std::filesystem::is_directory(dir)) return nullptr;
-        auto* instance = mxlCreateInstance(dir.c_str(), nullptr);
-        if (instance == nullptr) return nullptr;
-        open_[dir] = instance;
-        return instance;
     }
 
     // Creates this function's own domain. Does not rewrite an existing
@@ -276,8 +270,9 @@ struct Engine::Impl
 
     void runChannel(int channel)
     {
+        std::string const ch = std::to_string(channel);
         std::string routeKey;
-        mxlInstance sourceInstance = nullptr;
+        SourceReader source;
         mxlFlowReader reader = nullptr;
         mxlFlowWriter writer = nullptr;
         std::string writerFlow;
@@ -296,12 +291,39 @@ struct Engine::Impl
         std::uint8_t* outPayload = nullptr;
         double previewDue = 0;
 
+        // A source flow deleted or re-created under the same id (MXL_ERR_FLOW_INVALID, or a stalled
+        // head whose data file is gone or replaced) is opened again on a schedule. Meanwhile the
+        // output repeats its last grain in its own timing (hold.hpp), black and flagged invalid
+        // after CC_HOLD_MAX_S. Output indices only ever go up: MXL refuses a grain at or below the
+        // last one committed.
+        ReopenSchedule reopen;
+        double lostAt = 0;
+        bool resumePending = false;
+        std::string sourceDir;     // the source domain's directory at the last open
+        std::string watchPath;     // a missing flow's data file, checked every 20 ms between attempts
+        double watchDue = 0;
+        std::uint64_t lastOut = MXL_UNDEFINED_INDEX; // last whole output grain committed
+        bool holding = false;
+        std::vector<std::uint8_t> heldFrame;
+        std::uint32_t heldFlags = 0;
+        std::uint64_t heldGrains = 0;
+        std::int64_t outPhase = 0;   // hold::phaseOf at the last committed output grain
+        bool holdBlack = false;      // past CC_HOLD_MAX_S: black, flagged invalid
+        bool phaseWait = false;      // the source is back but behind the held grains
+        bool phaseWaitLogged = false;
+        int writeFailures = 0;
+        std::uint64_t lastHead = MXL_UNDEFINED_INDEX;
+        double headSeenAt = 0;
+        double probeDue = 0;
+        // A source that stops writing without going away (a writer killed with its flow left
+        // behind) is held too, until it writes again or a new writer replaces the flow.
+        std::uint64_t lastWrite = 0;
+        double writeSeenAt = 0;
+        bool stallHold = false;
+
         auto closeReader = [&] {
-            if (reader && sourceInstance)
-            {
-                mxlReleaseFlowReader(sourceInstance, reader);
-                reader = nullptr;
-            }
+            source.release();
+            reader = nullptr;
         };
         auto closeWriter = [&] {
             if (outOpen && writer)
@@ -314,10 +336,118 @@ struct Engine::Impl
                 mxlReleaseFlowWriter(output, writer);
                 writer = nullptr;
             }
+            lastOut = MXL_UNDEFINED_INDEX;
+            holding = false;
+            stallHold = false;
+            holdBlack = false;
+            phaseWait = false;
+            heldFrame.clear();
         };
         auto releaseAll = [&] {
             closeReader();
+            source.close();
             closeWriter();
+            reopen.reset();
+            resumePending = false;
+            watchPath.clear();
+        };
+        // The last whole output grain, read back from this channel's own output flow.
+        auto captureHeld = [&] {
+            heldFrame.clear();
+            if (writer == nullptr || output == nullptr || lastOut == MXL_UNDEFINED_INDEX) return;
+            mxlFlowReader own = nullptr;
+            if (mxlCreateFlowReader(output, writerFlow.c_str(), nullptr, &own) != MXL_STATUS_OK || own == nullptr) return;
+            mxlGrainInfo grain{};
+            std::uint8_t* payload = nullptr;
+            if (mxlFlowReaderGetGrainNonBlocking(own, lastOut, &grain, &payload) == MXL_STATUS_OK && payload != nullptr)
+            {
+                heldFrame.assign(payload, payload + grain.grainSize);
+                heldFlags = grain.flags;
+            }
+            mxlReleaseFlowReader(output, own);
+        };
+        // A writer that pauses up to this long and then catches up in sequence loses nothing;
+        // a longer silence is held (a killed writer). A restart takes 1–2 s, so it is still bridged.
+        auto stallSeconds = [&] { return std::max(0.25, 10.0 * current.rateDen / std::max(current.rateNum, 1)); };
+        auto catchUp = [&] { return hold::catchUpGrains(stallSeconds(), current.rateNum, current.rateDen); };
+        // 3 holding, 4 no_signal (black after CC_HOLD_MAX_S), 0 waiting.
+        auto holdState = [&] { return holding ? (holdBlack ? 4 : 3) : 0; };
+        // Writes the held grain at [first, last].
+        auto writeHeld = [&](std::uint64_t first, std::uint64_t last) {
+            for (auto next = first; next <= last; ++next)
+            {
+                mxlGrainInfo info{};
+                std::uint8_t* payload = nullptr;
+                if (mxlFlowWriterOpenGrain(writer, next, &info, &payload) != MXL_STATUS_OK || payload == nullptr) return;
+                std::memcpy(payload, heldFrame.data(), std::min<std::size_t>(heldFrame.size(), info.grainSize));
+                info.index = next;
+                info.flags = heldFlags;
+                info.validSlices = info.totalSlices;
+                if (mxlFlowWriterCommitGrain(writer, &info) != MXL_STATUS_OK) return;
+                lastOut = next;
+                ++heldGrains;
+            }
+        };
+        // Repeats the held grain in the output's own timing, up to now.
+        auto emitHeld = [&] {
+            if (!holding || writer == nullptr || heldFrame.empty() || lastOut == MXL_UNDEFINED_INDEX || outOpen) return;
+            if (!holdBlack && hold::expired(monoNow(), lostAt, config.holdMaxS))
+            {
+                heldFrame = hold::blackV210(current.width, current.height, heldFrame.size());
+                heldFlags = MXL_GRAIN_FLAG_INVALID;
+                holdBlack = true;
+                logWarn("mxl_hold_expired channel=" + ch + " source=" + routeKey + " after_s=" + std::to_string(config.holdMaxS) +
+                        ", output black grains flagged invalid (no_signal)");
+            }
+            if (phaseWait) return;
+            mxlRational rate{current.rateNum, current.rateDen};
+            auto const range = hold::heldRange(mxlGetCurrentIndex(&rate), outPhase, lastOut, catchUp());
+            writeHeld(range.first, range.last);
+        };
+        // An output grain could not be opened or committed. Not the reader's fault: keep it, wait
+        // a little and re-sync (which never goes at or below lastOut).
+        auto outputFailed = [&](std::string const& route) {
+            if (outOpen && writer)
+            {
+                mxlFlowWriterCancelGrain(writer);
+                outOpen = false;
+            }
+            produced = 0;
+            grainCpu = 0;
+            synced = false;
+            if (writeFailures++ % 250 == 0)
+            {
+                logWarn("output grain write failed channel=" + ch + " source=" + route + " index=" + std::to_string(index) + " last_out=" +
+                        (lastOut == MXL_UNDEFINED_INDEX ? std::string("none") : std::to_string(lastOut)) + " failures=" + std::to_string(writeFailures));
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        };
+        auto lostSource = [&](std::string const& route, std::string const& reason) {
+            closeReader();
+            if (outOpen && writer)
+            {
+                mxlFlowWriterCancelGrain(writer);
+                outOpen = false;
+            }
+            produced = 0;
+            grainCpu = 0;
+            synced = false;
+            stallHold = false;
+            phaseWait = false;
+            if (reopen.active()) return;
+            auto const now = monoNow();
+            reopen.start(now);
+            if (!resumePending)
+            {
+                lostAt = now;
+                heldGrains = 0;
+                holdBlack = false;
+                captureHeld();
+                holding = !heldFrame.empty();
+            }
+            resumePending = true;
+            logInfo(std::string(reason == "read_error" ? "mxl_reader_error" : "mxl_flow_recreated") + " channel=" + ch + " source=" + route +
+                    " reason=" + reason + (holding ? " holding last frame" : ""));
         };
 
         while (!stop.load())
@@ -344,61 +474,109 @@ struct Engine::Impl
             }
             if (reader == nullptr)
             {
+                auto const now = monoNow();
+                int const idle = holdState();
+                if (reopen.active() && !reopen.due(now))
+                {
+                    // A flow that comes back between two attempts is opened at once.
+                    bool appeared = false;
+                    if (!watchPath.empty() && now >= watchDue)
+                    {
+                        watchDue = now + 0.02;
+                        struct stat st{};
+                        appeared = ::stat(watchPath.c_str(), &st) == 0;
+                        if (appeared) watchPath.clear();
+                    }
+                    if (!appeared)
+                    {
+                        emitHeld();
+                        runtime.setState(channel, idle, 0, 0);
+                        auto const waitMs = std::clamp(static_cast<int>((reopen.next() - now) * 1000.0) + 1, 1, 5);
+                        std::this_thread::sleep_for(std::chrono::milliseconds(waitMs));
+                        continue;
+                    }
+                }
                 auto map = domains.scan(config.scanPath);
                 auto it = map.find(route.domainId);
-                if (it == map.end())
-                {
-                    runtime.setState(channel, 0, 0, 0);
-                    std::this_thread::sleep_for(std::chrono::milliseconds(backoffMs));
-                    backoffMs = std::min(2000, backoffMs * 2);
-                    continue;
-                }
-                sourceInstance = domains.openReadOnly(it->second);
-                if (sourceInstance == nullptr)
-                {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(backoffMs));
-                    continue;
-                }
-                auto const domainDir = std::filesystem::path(it->second);
-                auto text = readFile(domainDir / (route.flowId + ".mxl-flow") / "flow_def.json");
-                if (text.empty()) text = readFile(domainDir / route.flowId / "flow_def.json");
-                if (text.empty())
-                {
-                    char buffer[8192];
-                    std::size_t size = sizeof(buffer);
-                    if (mxlGetFlowDef(sourceInstance, route.flowId.c_str(), buffer, &size) == MXL_STATUS_OK) text.assign(buffer, buffer + std::strlen(buffer));
-                }
+                auto opened = it == map.end() ? SourceReader::Open::DomainMissing : source.open(it->second, route.flowId);
                 VideoFormat format;
-                if (!parseFlow(text, format))
+                if (opened == SourceReader::Open::Ok)
                 {
-                    runtime.setState(channel, 0, 0, 0);
+                    auto const domainDir = std::filesystem::path(it->second);
+                    auto text = readFile(domainDir / (route.flowId + ".mxl-flow") / "flow_def.json");
+                    if (text.empty()) text = readFile(domainDir / route.flowId / "flow_def.json");
+                    if (text.empty())
+                    {
+                        char buffer[8192];
+                        std::size_t size = sizeof(buffer);
+                        if (mxlGetFlowDef(source.instance(), route.flowId.c_str(), buffer, &size) == MXL_STATUS_OK) text.assign(buffer, buffer + std::strlen(buffer));
+                    }
+                    if (!parseFlow(text, format))
+                    {
+                        source.release();
+                        opened = SourceReader::Open::FlowMissing;
+                    }
+                }
+                if (opened != SourceReader::Open::Ok)
+                {
+                    runtime.setState(channel, idle, 0, 0);
+                    if (reopen.active())
+                    {
+                        if (reopen.attempts() == 0)
+                        {
+                            char const* why = opened == SourceReader::Open::DomainMissing ? "domain_missing"
+                                              : opened == SourceReader::Open::FlowMissing ? "flow_missing"
+                                                                                          : "open_failed";
+                            logInfo("mxl_flow_reopen_failed channel=" + ch + " source=" + key + " reason=" + why + ", retrying at 100, 200, 500 ms, then every 1 s");
+                        }
+                        reopen.failed(now);
+                        watchPath.clear();
+                        auto const dir = it != map.end() ? it->second : sourceDir;
+                        if (!dir.empty())
+                        {
+                            auto const data = (std::filesystem::path(dir) / (route.flowId + ".mxl-flow") / "data").string();
+                            struct stat st{};
+                            if (::stat(data.c_str(), &st) != 0) watchPath = data;
+                        }
+                        watchDue = now + 0.02;
+                        emitHeld();
+                        continue;
+                    }
                     std::this_thread::sleep_for(std::chrono::milliseconds(backoffMs));
                     backoffMs = std::min(2000, backoffMs * 2);
                     continue;
                 }
-                if (mxlCreateFlowReader(sourceInstance, route.flowId.c_str(), nullptr, &reader) != MXL_STATUS_OK || reader == nullptr)
+                reader = source.reader();
+                sourceDir = it->second;
+                watchPath.clear();
+                if (reopen.active())
                 {
-                    runtime.setState(channel, 0, 0, 0);
-                    std::this_thread::sleep_for(std::chrono::milliseconds(backoffMs));
-                    backoffMs = std::min(2000, backoffMs * 2);
-                    continue;
+                    logInfo("mxl_flow_reopened channel=" + ch + " source=" + key + " attempts=" + std::to_string(reopen.attempts() + 1) +
+                            " after_ms=" + std::to_string(static_cast<long>((now - lostAt) * 1000.0)));
+                    runtime.addFlowReopen(channel);
+                    reopen.reset();
                 }
+                lastHead = MXL_UNDEFINED_INDEX;
+                headSeenAt = now;
+                probeDue = 0;
+                lastWrite = 0;
+                writeSeenAt = now;
                 current = format;
                 haveFormat = true;
                 backoffMs = 50;
-                auto flowId = uuidV5("mxl-color-corrector/" + config.nmosSeed + "/ch/" + std::to_string(channel) + "/flow/" + std::to_string(format.width) + "x" +
+                auto flowId = uuidV5("mxl-color-corrector/" + config.nmosSeed + "/ch/" + ch + "/flow/" + std::to_string(format.width) + "x" +
                                      std::to_string(format.height) + "@" + std::to_string(format.rateNum) + "/" + std::to_string(format.rateDen) + "/" +
                                      format.interlace);
                 if (writer == nullptr || writerFlow != flowId)
                 {
                     closeWriter();
-                    auto sourceId = uuidV5("mxl-color-corrector/" + config.nmosSeed + "/ch/" + std::to_string(channel) + "/source");
-                    auto label = "CC " + std::to_string(channel) + " Video";
-                    auto json = flowJson(flowId, label, "CC " + std::to_string(channel) + ":Video", format, sourceId, nmos.deviceId());
+                    auto sourceId = uuidV5("mxl-color-corrector/" + config.nmosSeed + "/ch/" + ch + "/source");
+                    auto label = "CC " + ch + " Video";
+                    auto json = flowJson(flowId, label, "CC " + ch + ":Video", format, sourceId, nmos.deviceId());
                     bool created = false;
                     if (mxlCreateFlowWriter(output, json.c_str(), nullptr, &writer, nullptr, &created) != MXL_STATUS_OK || writer == nullptr)
                     {
-                        logError("mxlCreateFlowWriter failed for channel " + std::to_string(channel));
+                        logError("mxlCreateFlowWriter failed for channel " + ch);
                         closeReader();
                         std::this_thread::sleep_for(std::chrono::milliseconds(200));
                         continue;
@@ -416,7 +594,7 @@ struct Engine::Impl
                     logInfo(std::string(created ? "created" : "opened") + " output flow " + flowId);
                 }
                 std::string warning = isBt709(format.colorspace) ? "" : "flow colorimetry is " + format.colorspace + ", processing as BT.709";
-                if (!warning.empty()) logWarn("channel " + std::to_string(channel) + " " + warning);
+                if (!warning.empty()) logWarn("channel " + ch + " " + warning);
                 runtime.setRoute(channel, format.label.empty() ? route.flowId : format.label, route.domainId, route.flowId, writerFlow, warning, format.width,
                     format.height, format.rateNum, format.rateDen, format.interlace != "progressive");
             }
@@ -429,12 +607,66 @@ struct Engine::Impl
             mxlFlowInfo info{};
             if (mxlFlowReaderGetInfo(reader, &info) != MXL_STATUS_OK)
             {
-                closeReader();
+                lostSource(key, "read_error");
                 continue;
             }
-            mxlFlowRuntimeInfo runtimeInfo{};
-            mxlFlowReaderGetRuntimeInfo(reader, &runtimeInfo);
-            auto const head = runtimeInfo.headIndex;
+            auto const head = info.runtime.headIndex;
+            double const stallAfter = stallSeconds();
+            {
+                // A writer that went away leaves the old flow's head standing; a read is then never
+                // past the head, so MXL's own check never runs. Check while the head stands.
+                auto const now = monoNow();
+                if (head != lastHead)
+                {
+                    lastHead = head;
+                    headSeenAt = now;
+                }
+                else if (now >= probeDue && now - headSeenAt > std::max(0.02, 2.0 * current.rateDen / std::max(current.rateNum, 1)))
+                {
+                    probeDue = now + 0.02;
+                    if (!source.valid())
+                    {
+                        lostSource(key, head == MXL_UNDEFINED_INDEX ? "flow_replaced" : "flow_invalid");
+                        continue;
+                    }
+                }
+                // Writes (slice commits too) are the source's progress; the head stands while a
+                // slow writer fills a grain.
+                if (info.runtime.lastWriteTime != lastWrite)
+                {
+                    lastWrite = info.runtime.lastWriteTime;
+                    writeSeenAt = now;
+                    if (stallHold)
+                    {
+                        // The same flow is written again: follow it from its head (the sync below
+                        // ends the hold and never moves the output index back).
+                        stallHold = false;
+                        synced = false;
+                    }
+                }
+                else if (synced && !holding && lastOut != MXL_UNDEFINED_INDEX && now - writeSeenAt > stallAfter)
+                {
+                    if (outOpen)
+                    {
+                        mxlFlowWriterCancelGrain(writer);
+                        outOpen = false;
+                    }
+                    produced = 0;
+                    grainCpu = 0;
+                    captureHeld();
+                    holding = !heldFrame.empty();
+                    if (holding)
+                    {
+                        stallHold = true;
+                        holdBlack = false;
+                        lostAt = now;
+                        heldGrains = 0;
+                        resumePending = true;
+                        logInfo("mxl_source_stalled channel=" + ch + " source=" + key + " no write for " +
+                                std::to_string(static_cast<long>((now - writeSeenAt) * 1000.0)) + " ms, holding last frame");
+                    }
+                }
+            }
             int const lineBytes = v210Stride(current.width);
             auto const sliceBytes = info.config.discrete.sliceSizes[0];
             auto const totalHint = current.height > 0 && lineBytes > 0 && sliceBytes >= static_cast<std::uint32_t>(lineBytes) &&
@@ -452,11 +684,17 @@ struct Engine::Impl
                     produced = 0;
                     grainCpu = 0;
                 }
-                logInfo("channel " + std::to_string(channel) + " mode " + (decision.slice ? "slice" : std::string("whole-grain:") + fallbackName(decision.reason)));
+                logInfo("channel " + ch + " mode " + (decision.slice ? "slice" : std::string("whole-grain:") + fallbackName(decision.reason)));
                 logged = decision.reason;
             }
-            int const state = decision.slice ? 1 : 2;
+            int const state = holding ? holdState() : decision.slice ? 1 : 2;
             runtime.setState(channel, state, decision.slice ? 1 : 0, static_cast<int>(decision.reason));
+            if (stallHold)
+            {
+                emitHeld();
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                continue;
+            }
             auto const grainCount = std::max<std::uint32_t>(info.config.discrete.grainCount, 2);
             if (synced && head != MXL_UNDEFINED_INDEX && head > index && head - index > grainCount / 2)
             {
@@ -470,13 +708,69 @@ struct Engine::Impl
             }
             if (!synced)
             {
-                if (head == MXL_UNDEFINED_INDEX)
+                // A new flow shows head 0 until its first grain (its flow info starts zeroed); hold on.
+                if (head == MXL_UNDEFINED_INDEX || head == 0)
                 {
+                    emitHeld();
                     std::this_thread::sleep_for(std::chrono::milliseconds(5));
                     continue;
                 }
-                index = decision.slice || head < static_cast<std::uint64_t>(config.wholeGrainOffset) ? head : head - static_cast<std::uint64_t>(config.wholeGrainOffset);
+                auto const resume = hold::resumeAt(head, config.wholeGrainOffset, decision.slice, lastOut, catchUp());
+                bool const writing = monoNow() - writeSeenAt < stallAfter;
+                if (resume.action == hold::Action::Rephase && writing)
+                {
+                    // The source runs far behind the output (a writer indexing by UTC is 37 s behind
+                    // TAI) and would never catch up; the output cannot go back. Make the output flow
+                    // again in the source's timing; readers re-open a re-created flow.
+                    logWarn("mxl_output_recreated channel=" + ch + " source=" + key + " lag_grains=" + std::to_string(resume.lag) +
+                            ", the source runs behind the output; output flow made again in its timing");
+                    closeReader();
+                    closeWriter();
+                    phaseWait = false;
+                    phaseWaitLogged = false;
+                    continue;
+                }
+                if (resume.action != hold::Action::Read)
+                {
+                    // A source a little behind the held grains is waited for without holding further,
+                    // so it catches up; a source that does not write is held on.
+                    phaseWait = writing && resume.wait();
+                    if (phaseWait && !phaseWaitLogged)
+                    {
+                        logInfo("mxl_flow_resume_waiting channel=" + ch + " source=" + key + " head=" + std::to_string(head) + " last_out=" + std::to_string(lastOut) +
+                                " lag_grains=" + std::to_string(resume.lag));
+                        phaseWaitLogged = true;
+                    }
+                    if (!holding && !phaseWait)
+                    {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                        continue;
+                    }
+                    emitHeld();
+                    int const waitState = holdState();
+                    runtime.setState(channel, waitState == 0 ? (decision.slice ? 1 : 2) : waitState, decision.slice ? 1 : 0, static_cast<int>(decision.reason));
+                    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                    continue;
+                }
+                // A source a grain or two past the held ones: fill the gap with the held picture
+                // rather than leave grains MXL marks invalid.
+                if (holding && !heldFrame.empty() && lastOut != MXL_UNDEFINED_INDEX && resume.index > lastOut + 1 && resume.index - lastOut - 1 <= catchUp())
+                {
+                    writeHeld(lastOut + 1, resume.index - 1);
+                }
+                index = resume.index;
+                phaseWait = false;
+                phaseWaitLogged = false;
                 synced = true;
+                if (resumePending)
+                {
+                    logInfo("mxl_flow_resumed channel=" + ch + " source=" + key + " after_ms=" + std::to_string(static_cast<long>((monoNow() - lostAt) * 1000.0)) +
+                            " held_grains=" + std::to_string(heldGrains));
+                    resumePending = false;
+                }
+                // The held picture stays until the first real grain, for holes right after the resume.
+                holding = false;
+                holdBlack = false;
             }
             if (!decision.slice && head < index + static_cast<std::uint64_t>(std::max(config.wholeGrainOffset, 0)))
             {
@@ -532,6 +826,11 @@ struct Engine::Impl
                 }
                 if (done)
                 {
+                    lastOut = index;
+                    if (!holding && !heldFrame.empty()) heldFrame.clear();
+                    writeFailures = 0;
+                    mxlRational rate{current.rateNum, current.rateDen};
+                    outPhase = hold::phaseOf(index, mxlGetCurrentIndex(&rate));
                     runtime.addGrain(channel, matrix.bypass, stats.clipped, stats.samples == 0 ? 1 : stats.samples, sliceSeconds, grainCpu, t1);
                     grainCpu = 0;
                     if (t1 >= previewDue && input && outPayload)
@@ -544,6 +843,31 @@ struct Engine::Impl
                 return true;
             };
 
+            // A grain still too early while the head is past it will never come: the writer left it
+            // unfinished, or never wrote it (a re-created flow starts at its own head, so the
+            // whole-grain offset or the held output can point before its first grain). Skip it
+            // rather than wait until the head is half a ring ahead.
+            auto skipHole = [&](std::uint16_t want) {
+                mxlFlowRuntimeInfo now{};
+                if (mxlFlowReaderGetRuntimeInfo(reader, &now) != MXL_STATUS_OK || now.headIndex == MXL_UNDEFINED_INDEX || now.headIndex <= index) return;
+                // The grain may have been finished just before the head moved on: read it once more.
+                mxlGrainInfo again{};
+                std::uint8_t* payload = nullptr;
+                auto const status = want > 0 ? mxlFlowReaderGetGrainSliceNonBlocking(reader, index, want, &again, &payload)
+                                             : mxlFlowReaderGetGrainNonBlocking(reader, index, &again, &payload);
+                if (status != MXL_ERR_OUT_OF_RANGE_TOO_EARLY) return;
+                if (outOpen)
+                {
+                    mxlFlowWriterCancelGrain(writer);
+                    outOpen = false;
+                }
+                produced = 0;
+                grainCpu = 0;
+                // Right after a hold, repeat the held picture there rather than leave a grain MXL marks invalid.
+                if (!heldFrame.empty() && (lastOut == MXL_UNDEFINED_INDEX || index > lastOut)) writeHeld(index, index);
+                ++index;
+            };
+
             if (decision.slice)
             {
                 std::uint16_t want = static_cast<std::uint16_t>(std::max(1, produced + 1));
@@ -552,6 +876,7 @@ struct Engine::Impl
                 auto status = mxlFlowReaderGetGrainSlice(reader, index, want, 2000000, &grain, &payload);
                 if (status == MXL_ERR_OUT_OF_RANGE_TOO_EARLY || status == MXL_ERR_TIMEOUT || status == MXL_ERR_NOT_READY)
                 {
+                    skipHole(want);
                     continue;
                 }
                 if (status == MXL_ERR_OUT_OF_RANGE_TOO_LATE)
@@ -568,7 +893,7 @@ struct Engine::Impl
                 }
                 if (status != MXL_STATUS_OK)
                 {
-                    closeReader();
+                    lostSource(key, status == MXL_ERR_FLOW_INVALID ? "flow_invalid" : "read_error");
                     continue;
                 }
                 if (grain.validSlices < grain.totalSlices) sawPartial = true;
@@ -580,7 +905,7 @@ struct Engine::Impl
                     int const from = (grain.flags & MXL_GRAIN_FLAG_INVALID) != 0 ? 0 : already;
                     if (!finishGrain(payload, grain, from, current.height))
                     {
-                        closeReader();
+                        outputFailed(key);
                         continue;
                     }
                     produced = 0;
@@ -590,7 +915,7 @@ struct Engine::Impl
                 {
                     if (!finishGrain(payload, grain, already, rows))
                     {
-                        closeReader();
+                        outputFailed(key);
                         continue;
                     }
                     produced = grain.validSlices;
@@ -603,6 +928,7 @@ struct Engine::Impl
                 auto status = mxlFlowReaderGetGrain(reader, index, 5000000, &grain, &payload);
                 if (status == MXL_ERR_OUT_OF_RANGE_TOO_EARLY || status == MXL_ERR_TIMEOUT || status == MXL_ERR_NOT_READY)
                 {
+                    skipHole(0);
                     continue;
                 }
                 if (status == MXL_ERR_OUT_OF_RANGE_TOO_LATE)
@@ -613,12 +939,12 @@ struct Engine::Impl
                 }
                 if (status != MXL_STATUS_OK)
                 {
-                    closeReader();
+                    lostSource(key, status == MXL_ERR_FLOW_INVALID ? "flow_invalid" : "read_error");
                     continue;
                 }
                 if (!finishGrain(payload, grain, 0, current.height))
                 {
-                    closeReader();
+                    outputFailed(key);
                     continue;
                 }
                 ++index;

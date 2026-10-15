@@ -14,6 +14,7 @@ find_package(Threads REQUIRED)
 
 set(CC_CORE_SOURCES
     src/v210.cpp
+    src/hold.cpp
     src/color/controls.cpp
     src/color/process.cpp
     src/color/process_avx2.cpp
@@ -49,6 +50,7 @@ if(CC_BUILD_TESTS)
         tests/unit/test_color.cpp
         tests/unit/test_config.cpp
         tests/unit/test_api.cpp
+        tests/unit/test_hold.cpp
     )
     target_include_directories(unit-tests PRIVATE src third_party)
     target_link_libraries(unit-tests PRIVATE cc_core)
@@ -182,11 +184,20 @@ inline std::string_view indexHtml() {
 ")
     endif()
 
-    add_executable(mxl-color-corrector src/main.cpp src/engine.cpp ${WEBUI_GENERATED})
+    add_executable(mxl-color-corrector src/main.cpp src/engine.cpp src/mxl_source.cpp ${WEBUI_GENERATED})
     target_include_directories(mxl-color-corrector PRIVATE src ${CMAKE_CURRENT_BINARY_DIR}/generated)
     target_link_libraries(mxl-color-corrector PRIVATE cc_core mxl::mxl)
     target_compile_options(mxl-color-corrector PRIVATE -Wall -Wextra -Wno-unused-parameter)
     target_compile_definitions(mxl-color-corrector PRIVATE CC_HAS_UI=1)
+
+    if(CC_BUILD_TESTS)
+        # Unit tests on a real MXL domain in a temporary directory (re-created flows).
+        add_executable(unit-tests-mxl tests/unit/test_main.cpp tests/mxl/test_flow_reopen.cpp src/mxl_source.cpp)
+        target_include_directories(unit-tests-mxl PRIVATE src third_party)
+        target_link_libraries(unit-tests-mxl PRIVATE cc_core mxl::mxl)
+        target_compile_options(unit-tests-mxl PRIVATE -Wall -Wextra -Wno-unused-parameter)
+        add_test(NAME unit-tests-mxl COMMAND unit-tests-mxl)
+    endif()
 
     add_executable(mxl-cc-pattern tests/tools/pattern_writer.cpp)
     target_link_libraries(mxl-cc-pattern PRIVATE cc_core mxl::mxl)

@@ -31,6 +31,8 @@ jobs:
         run: cmake --build build -j
       - name: unit
         run: ./build/unit-tests
+      - name: unit (MXL domain)
+        run: ./build/unit-tests-mxl
       - name: bench (this tree, then main on the same runner)
         run: |
           ./build/mxl-cc-bench
@@ -46,6 +48,10 @@ jobs:
           CC_BUILD: build
       - name: lifecycle
         run: python3 tests/integration/lifecycle.py
+        env:
+          CC_BUILD: build
+      - name: re-created source flow
+        run: python3 tests/integration/reopen.py
         env:
           CC_BUILD: build
 
