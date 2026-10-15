@@ -308,6 +308,11 @@ struct Engine::Impl
         std::uint64_t lastHead = MXL_UNDEFINED_INDEX;
         double headSeenAt = 0;
         double probeDue = 0;
+        // A source that stops writing without going away (a writer killed with its flow left
+        // behind) is held too, until it writes again or a new writer replaces the flow.
+        std::uint64_t lastWrite = 0;
+        double writeSeenAt = 0;
+        bool stallHold = false;
         // Held grains catch up at most this many grains; a longer gap jumps to the current index.
         // A re-opened source does not move the output index back by less than this.
         constexpr std::uint64_t kHoldCatchUp = 8;
@@ -329,6 +334,7 @@ struct Engine::Impl
             }
             lastOut = MXL_UNDEFINED_INDEX;
             holding = false;
+            stallHold = false;
             heldFrame.clear();
         };
         auto releaseAll = [&] {
@@ -387,6 +393,7 @@ struct Engine::Impl
             produced = 0;
             grainCpu = 0;
             synced = false;
+            stallHold = false;
             if (reopen.active()) return;
             auto const now = monoNow();
             reopen.start(now);
@@ -511,6 +518,8 @@ struct Engine::Impl
                 lastHead = MXL_UNDEFINED_INDEX;
                 headSeenAt = now;
                 probeDue = 0;
+                lastWrite = 0;
+                writeSeenAt = now;
                 current = format;
                 haveFormat = true;
                 backoffMs = 50;
@@ -579,6 +588,41 @@ struct Engine::Impl
                         continue;
                     }
                 }
+                // Writes (slice commits too) are the source's progress; the head stands while a
+                // slow writer fills a grain.
+                if (info.runtime.lastWriteTime != lastWrite)
+                {
+                    lastWrite = info.runtime.lastWriteTime;
+                    writeSeenAt = now;
+                    if (stallHold)
+                    {
+                        // The same flow is written again: follow it from its head (the sync below
+                        // ends the hold and never moves the output index back).
+                        stallHold = false;
+                        synced = false;
+                    }
+                }
+                else if (synced && !holding && lastOut != MXL_UNDEFINED_INDEX && now - writeSeenAt > std::max(0.1, 4.0 * current.rateDen / std::max(current.rateNum, 1)))
+                {
+                    if (outOpen)
+                    {
+                        mxlFlowWriterCancelGrain(writer);
+                        outOpen = false;
+                    }
+                    produced = 0;
+                    grainCpu = 0;
+                    captureHeld();
+                    holding = !heldFrame.empty();
+                    if (holding)
+                    {
+                        stallHold = true;
+                        lostAt = now;
+                        heldGrains = 0;
+                        resumePending = true;
+                        logInfo("mxl_source_stalled channel=" + ch + " source=" + key + " no write for " +
+                                std::to_string(static_cast<long>((now - writeSeenAt) * 1000.0)) + " ms, holding last frame");
+                    }
+                }
             }
             int const lineBytes = v210Stride(current.width);
             auto const sliceBytes = info.config.discrete.sliceSizes[0];
@@ -603,6 +647,12 @@ struct Engine::Impl
             holdLag = decision.slice ? 0 : config.wholeGrainOffset;
             int const state = holding ? 3 : decision.slice ? 1 : 2;
             runtime.setState(channel, state, decision.slice ? 1 : 0, static_cast<int>(decision.reason));
+            if (stallHold)
+            {
+                emitHeld();
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                continue;
+            }
             auto const grainCount = std::max<std::uint32_t>(info.config.discrete.grainCount, 2);
             if (synced && head != MXL_UNDEFINED_INDEX && head > index && head - index > grainCount / 2)
             {

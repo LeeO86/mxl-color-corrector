@@ -4,7 +4,8 @@
 A paced pattern writer feeds channel 1. It stops (MXL deletes the flow with its last writer) and
 starts again: once at once and once after a 1 s gap. Each time the channel must read the new
 flow again within 1 s, without an IS-05 activation, count one re-open, and keep its output flow
-going meanwhile (state holding, the output head advancing). Twice: with slice commits (slice
+going meanwhile (state holding, the output head advancing). Then the writer is killed, which
+leaves its flow behind: the channel holds its output until the writer is back. Twice: with slice commits (slice
 mode) and with whole grains (whole-grain mode, which reads one grain behind the head and so
 starts before the new flow's first grain).
 """
@@ -155,7 +156,7 @@ def run(mode):
         if h0 is None or h1 is None or h1 < h0 + 10:
             raise SystemExit(f"output did not advance while the source was missing: {h0} -> {h1}")
         time.sleep(0.4)
-        third = writer(3)
+        third = writer(8)
         procs.append(third)
         base = metric("grains_processed_total")
         results["after_gap"] = wait_until("grains after the gap", lambda: metric("grains_processed_total") > base + 2, RESUME_S + 1)
@@ -166,12 +167,35 @@ def run(mode):
             raise SystemExit(f"output did not continue after the re-open: {h1} -> {h2}")
         if channel()["output_flow"] != out_flow:
             raise SystemExit("the output flow changed")
+
+        # 3: the writer is killed and leaves its flow: no write, the flow stays valid. Hold, and
+        # follow the writer when it is back.
+        reopens = metric("flow_reopens_total")
+        third.send_signal(signal.SIGKILL)
+        third.wait(timeout=5)
+        wait_until("holding after a kill", lambda: channel()["state"] == "holding", 1)
+        k0 = output_head(out_flow)
+        time.sleep(0.4)
+        k1 = output_head(out_flow)
+        if k0 is None or k1 is None or k1 < k0 + 10:
+            raise SystemExit(f"output did not advance while the writer was dead: {k0} -> {k1}")
+        fourth = writer(3)
+        procs.append(fourth)
+        base = metric("grains_processed_total")
+        results["after_kill"] = wait_until("grains after the kill", lambda: metric("grains_processed_total") > base + 2, RESUME_S + 1)
+        wait_until(mode, lambda: channel()["state"] == mode, 1)
+        k2 = output_head(out_flow)
+        if k2 is None or k2 <= k1:
+            raise SystemExit(f"output did not continue after the kill: {k1} -> {k2}")
+        results["reopens_after_kill"] = metric("flow_reopens_total") - reopens
         log.flush()
         text = open(log_path).read()
         for event in ("mxl_flow_recreated", "mxl_flow_reopened", "mxl_flow_resumed"):
             if text.count(event) < 2:
                 raise SystemExit(f"expected two {event} logs\n{text}")
         for name, seconds in results.items():
+            if name.startswith("reopens"):
+                continue
             if seconds > RESUME_S:
                 raise SystemExit(f"{name}: grains came back after {seconds:.2f} s, more than {RESUME_S} s")
         print("reopen ok", mode, {k: round(v, 3) for k, v in results.items()}, "held output", h0, "->", h1)

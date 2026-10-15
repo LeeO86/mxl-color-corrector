@@ -216,13 +216,14 @@ reader still holds the old file; its head stands, and a read past it returns
   a flow that another channel also reads would get the stale reader back on a shared instance.
   The instance follows the route's domain and is made again when the domain directory was
   removed and made again.
-- Logs `mxl_flow_recreated` (once per event, with `reason=flow_invalid|flow_replaced`),
+- Logs `mxl_source_stalled` (held without a write), `mxl_flow_recreated` (once per event, with `reason=flow_invalid|flow_replaced`),
   `mxl_flow_reopen_failed` (the first failed attempt of an event), `mxl_flow_reopened`
   (`attempts`, `after_ms`) and `mxl_flow_resumed` (`after_ms` to the new flow's head,
   `held_grains`); metric `flow_reopens_total`.
 - A writer that stops without deleting its flow (killed, flow directory left) leaves a valid
-  flow whose head stands: the channel waits as before, without holding, and re-opens when a
-  new writer replaces the files.
+  flow that is no longer written. After no write (slice commits count) for four grain periods,
+  at least 100 ms, the channel holds its output the same way (`mxl_source_stalled`). It follows
+  the flow again when it is written again, or re-opens it when a new writer replaces the files.
 
 ---
 
