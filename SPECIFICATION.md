@@ -220,9 +220,13 @@ reader still holds the old file; its head stands, and a read past it returns
   at the grain rate, in the output's own timing: the held grains keep the distance to the
   grain clock that the output had at its last grain (`hold.hpp`), also for a source that
   indexes behind the clock (a gateway indexing by capture time) or ahead of it. When the hold
-  starts it fills in the time since the last output grain (up to the stall threshold plus 8
-  grains), so no grain is skipped and none is flagged invalid before the limit. The same applies
-  right after the resume: a hole there is filled with the held picture.
+  starts it fills in the time since the last output grain, so no grain is skipped.
+- **No holes.** MXL marks every grain a writer skips `MXL_GRAIN_FLAG_INVALID`, and readers take
+  that as no signal. So whenever the next output grain is more than one past the last, the gap is
+  filled with the last output grain, up to the output's ring (`output_gap_filled`, at most every
+  5 s; 1.2.2). This covers the channel falling behind (the late check jumps to the head), a
+  source grain that is skipped, and the resume after a hold. A source grain flagged invalid is
+  passed through as it is (§5.1).
 - **Limit.** After `CC_HOLD_MAX_S` (default 10 s; 0 holds forever) the held picture turns
   black (Y 64, Cb and Cr 512) and the grains carry `MXL_GRAIN_FLAG_INVALID`
   (state `no_signal`, log `mxl_hold_expired`). The output flow keeps its grain rate. MXL

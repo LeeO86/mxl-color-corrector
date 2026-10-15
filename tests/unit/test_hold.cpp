@@ -145,3 +145,25 @@ TEST_CASE("the hold fills in the stall time without a jump, so no grain is marke
     // A gap far beyond it still jumps.
     CHECK(hold::heldRange(1000 + 500, 0, 1000, up50).first == 1500);
 }
+
+TEST_CASE("a gap in the output is filled, never left for MXL to mark invalid")
+{
+    // The output fell 7 grains behind (late check) or resumes past the held grains.
+    auto range = hold::fillRange(1000, 1008, 50);
+    CHECK(range.first == 1001);
+    CHECK(range.last == 1007);
+    // Consecutive: nothing to fill.
+    range = hold::fillRange(1000, 1001, 50);
+    CHECK(range.first > range.last);
+    range = hold::fillRange(hold::kUndefined, 1001, 50);
+    CHECK(range.first > range.last);
+    // A gap longer than the ring: only the last `ring` grains, which cover every slot.
+    range = hold::fillRange(1000, 2000, 50);
+    CHECK(range.first == 1950);
+    CHECK(range.last == 1999);
+    // The held output starting 22 grains after the last one (the cc thread was late): filled,
+    // not jumped, when the ring is larger than the catch-up.
+    auto const held = hold::heldRange(1022 + 2, -2, 1000, 50);
+    CHECK(held.first == 1001);
+    CHECK(held.last == 1022);
+}

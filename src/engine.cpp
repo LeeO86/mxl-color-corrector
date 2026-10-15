@@ -385,6 +385,13 @@ struct Engine::Impl
         // a longer silence is held (a killed writer). A restart takes 1–2 s, so it is still bridged.
         auto stallSeconds = [&] { return std::max(0.25, 10.0 * current.rateDen / std::max(current.rateNum, 1)); };
         auto catchUp = [&] { return hold::catchUpGrains(stallSeconds(), current.rateNum, current.rateDen); };
+        // The output flow's ring in grains (its history), at least the catch-up: a gap up to this is
+        // filled with the held picture rather than left to MXL to mark invalid.
+        auto outRing = [&] {
+            double const rate = current.rateDen > 0 && current.rateNum > 0 ? static_cast<double>(current.rateNum) / current.rateDen : 50.0;
+            auto const grains = static_cast<std::uint64_t>(std::ceil(static_cast<double>(config.historyDurationNs) * 1e-9 * rate)) + 2;
+            return std::clamp<std::uint64_t>(grains, catchUp(), 500);
+        };
         // 3 holding, 4 no_signal (black after CC_HOLD_MAX_S), 0 waiting.
         auto holdState = [&] { return holding ? (holdBlack ? 4 : 3) : 0; };
         // Writes the held grain at [first, last].
@@ -416,8 +423,24 @@ struct Engine::Impl
             }
             if (phaseWait) return;
             mxlRational rate{current.rateNum, current.rateDen};
-            auto const range = hold::heldRange(mxlGetCurrentIndex(&rate), outPhase, lastOut, catchUp());
+            auto const range = hold::heldRange(mxlGetCurrentIndex(&rate), outPhase, lastOut, outRing());
             writeHeld(range.first, range.last);
+        };
+        // Before output grain `next`: fill a gap after the last output grain with that grain's picture
+        // (the output fell behind, a source grain was skipped, or the output resumes past the held
+        // grains), so no output grain is left invalid.
+        double gapLogDue = 0;
+        auto fillGap = [&](std::uint64_t next) {
+            auto const range = hold::fillRange(lastOut, next, outRing());
+            if (range.first > range.last || writer == nullptr) return;
+            if (heldFrame.empty()) captureHeld();
+            if (heldFrame.empty()) return;
+            writeHeld(range.first, range.last);
+            if (auto const now = monoNow(); now >= gapLogDue)
+            {
+                logInfo("output_gap_filled channel=" + ch + " grains=" + std::to_string(range.last - range.first + 1) + " (repeated the last output grain)");
+                gapLogDue = now + 5.0;
+            }
         };
         // An output grain could not be opened or committed. Not the reader's fault: keep it, wait
         // a little and re-sync (which never goes at or below lastOut).
@@ -760,12 +783,6 @@ struct Engine::Impl
                     std::this_thread::sleep_for(std::chrono::milliseconds(2));
                     continue;
                 }
-                // A source a grain or two past the held ones: fill the gap with the held picture
-                // rather than leave grains MXL marks invalid.
-                if (holding && !heldFrame.empty() && lastOut != MXL_UNDEFINED_INDEX && resume.index > lastOut + 1 && resume.index - lastOut - 1 <= catchUp())
-                {
-                    writeHeld(lastOut + 1, resume.index - 1);
-                }
                 index = resume.index;
                 phaseWait = false;
                 phaseWaitLogged = false;
@@ -797,6 +814,7 @@ struct Engine::Impl
                 auto t0 = monoNow();
                 if (!outOpen)
                 {
+                    fillGap(index);
                     auto opened = mxlFlowWriterOpenGrain(writer, index, &outInfo, &outPayload);
                     if (opened != MXL_STATUS_OK || outPayload == nullptr)
                     {
@@ -871,8 +889,6 @@ struct Engine::Impl
                 }
                 produced = 0;
                 grainCpu = 0;
-                // Right after a hold, repeat the held picture there rather than leave a grain MXL marks invalid.
-                if (!heldFrame.empty() && (lastOut == MXL_UNDEFINED_INDEX || index > lastOut)) writeHeld(index, index);
                 ++index;
             };
 

@@ -112,8 +112,8 @@ def output_head(flow):
     return doc["index"]
 
 
-def invalid_grains(flow, since, count=90):
-    """Invalid output grains above index `since` (the hold under test), among the last `count`."""
+def invalid_grains(flow, count=90):
+    """Invalid output grains among the last `count` (none may come before the hold limit)."""
     proc = subprocess.run(
         [os.path.join(BUILD, "mxl-cc-sample"), "--domain", os.path.join(BASE, "cc-out"), "--flow", flow, "--count-invalid", str(count)],
         check=False,
@@ -125,10 +125,9 @@ def invalid_grains(flow, since, count=90):
     doc = json.loads(proc.stdout)
     if doc["checked"] < count // 2:
         raise SystemExit(f"too few output grains in the history: {doc}")
-    found = [doc["head"] - behind for behind in doc["invalid_behind_head"] if doc["head"] - behind > since]
     if doc["invalid"]:
-        print("invalid output grains", doc, "since", since, "late_grains_total", metric("late_grains_total"), flush=True)
-    return len(found)
+        print("invalid output grains", doc, "late_grains_total", metric("late_grains_total"), flush=True)
+    return doc["invalid"]
 
 
 def wait_until(what, pred, seconds):
@@ -206,6 +205,8 @@ def run(mode):
         cpu0, t0 = metric_plain("process_cpu_seconds_total"), time.monotonic()
         results["immediate"] = wait_until("grains from the re-created flow", lambda: metric("grains_processed_total") > base + 2, RESUME_S + 1)
         wait_until("one re-open", lambda: metric("flow_reopens_total") == 1, 2)
+        if invalid_grains(out_flow, 40):
+            raise SystemExit("invalid output grains around the re-create")
         time.sleep(1.0)
         cpu = (metric_plain("process_cpu_seconds_total") - cpu0) / (time.monotonic() - t0)
         if cpu > 0.6:
@@ -216,7 +217,6 @@ def run(mode):
         second.wait(timeout=10)
         wait_until("holding", lambda: channel()["state"] == "holding", 1)
         h0 = output_head(out_flow)
-        gap_since = h0 - 30  # the hold under test started at most 30 grains before
         time.sleep(0.4)
         h1 = output_head(out_flow)
         if h0 is None or h1 is None or h1 < h0 + 10:
@@ -233,7 +233,7 @@ def run(mode):
             raise SystemExit(f"output did not continue after the re-open: {h1} -> {h2}")
         if channel()["output_flow"] != out_flow:
             raise SystemExit("the output flow changed")
-        if invalid_grains(out_flow, gap_since):
+        if invalid_grains(out_flow):
             raise SystemExit("invalid output grains around the 1 s gap")
 
         # 3: the writer is killed and leaves its flow: no write, the flow stays valid. Hold, and
@@ -243,7 +243,6 @@ def run(mode):
         third.wait(timeout=5)
         wait_until("holding after a kill", lambda: channel()["state"] == "holding", 1)
         k0 = output_head(out_flow)
-        kill_since = k0 - 30  # 250 ms stall threshold, 12.5 grains, plus margin
         time.sleep(0.4)
         k1 = output_head(out_flow)
         if k0 is None or k1 is None or k1 < k0 + 10:
@@ -257,7 +256,7 @@ def run(mode):
         if k2 is None or k2 <= k1:
             raise SystemExit(f"output did not continue after the kill: {k1} -> {k2}")
         results["reopens_after_kill"] = metric("flow_reopens_total") - reopens
-        if invalid_grains(out_flow, kill_since):
+        if invalid_grains(out_flow):
             raise SystemExit("invalid output grains around the kill")
 
         # 4: gone for longer than CC_HOLD_MAX_S: black, flagged invalid, state no_signal.

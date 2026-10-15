@@ -50,6 +50,16 @@ struct Range
     return {target - lastOut > catchUp ? target : lastOut + 1, target};
 }
 
+// The grains to fill before writing output grain `next`, so the output has no hole: MXL marks
+// every grain a writer skips invalid, which a reader takes as no signal. Only the last `ring` grains
+// can still be read, so at most that many are filled; the rest of the ring is overwritten by them.
+[[nodiscard]] inline Range fillRange(std::uint64_t lastOut, std::uint64_t next, std::uint64_t ring)
+{
+    if (lastOut == kUndefined || next == kUndefined || next <= lastOut + 1) return {};
+    auto const first = next - lastOut - 1 > ring ? next - ring : lastOut + 1;
+    return {first, next - 1};
+}
+
 // Where the output resumes once the source has a head again. MXL refuses a grain at or below the
 // last one committed (PosixDiscreteFlowWriter::openGrain → MXL_ERR_INVALID_ARG), so a read is
 // always above lastOut.
