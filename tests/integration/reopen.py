@@ -224,9 +224,19 @@ def run(mode):
         fourth.wait(timeout=10)
         wait_until("holding", lambda: channel()["state"] == "holding", 1)
         results["no_signal_after"] = wait_until("no_signal", lambda: channel()["state"] == "no_signal", 3.5)
-        grain = output_grain(out_flow)
-        if grain is None or not grain["flags"] & 1 or grain["points"][0]["y_code"] != 64 or grain["points"][0]["cb"] != 512:
-            raise SystemExit(f"expected a black grain flagged invalid after the limit: {grain}")
+        # The state turns no_signal as the first black grain is due; it is written at the next grain
+        # tick, and the sample tool prefers a valid grain while there is one.
+        seen = []
+
+        def black():
+            grain = output_grain(out_flow)
+            seen.append(grain)
+            return grain is not None and grain["flags"] & 1 and grain["points"][0]["y_code"] == 64 and grain["points"][0]["cb"] == 512
+
+        try:
+            wait_until("a black grain flagged invalid", black, 1.0)
+        except SystemExit:
+            raise SystemExit(f"expected a black grain flagged invalid after the limit: {seen[-1]}")
         n0 = output_head(out_flow)
         time.sleep(0.3)
         n1 = output_head(out_flow)
