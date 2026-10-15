@@ -7,6 +7,10 @@ A paced pattern writer feeds channel 1.
 3. It is killed and leaves its flow behind: no write, the flow stays valid; the output holds.
 4. It stops for longer than CC_HOLD_MAX_S (2 s here): the output turns black, flagged invalid
    (state no_signal), and resumes when the writer is back.
+4b. It stays away for 2 s and comes back: grains again within 0.15 s of its flow's data file
+   appearing. In the passes with a lagging writer its whole domain directory is removed, and
+   the writer makes the domain again with domain_def.json 300 ms after the flow; grains again
+   within 0.15 s of domain_def.json appearing.
 5. (writer on the clock only) A writer 37 s behind the clock (indexing by UTC) replaces it: the
    output cannot go back, so the output flow is made again in its timing.
 Until the hold limit, no output grain is flagged invalid (the hold fills in the stall time).
@@ -17,6 +21,7 @@ with a writer on the clock and one 12 grains behind it (a gateway indexing by ca
 
 import json
 import os
+import shutil
 import re
 import signal
 import subprocess
@@ -35,6 +40,7 @@ FLOW = "88888888-8888-4888-8888-888888888888"
 WEB = int(os.environ.get("CC_WEB_PORT", "18144"))
 NMOS = int(os.environ.get("CC_NMOS_PORT", "18145"))
 RESUME_S = float(os.environ.get("CC_RESUME_S", "1.0"))
+REAPPEAR_S = float(os.environ.get("CC_REAPPEAR_S", "0.15"))
 
 
 def http(method, path, body=None, port=WEB):
@@ -63,7 +69,7 @@ def channel():
     return json.loads(http("GET", "/api/v1/status")[1])["channels"][0]
 
 
-def writer(seconds, lag=None):
+def writer(seconds, lag=None, extra=()):
     return subprocess.Popen(
         [
             os.path.join(BUILD, "mxl-cc-pattern"),
@@ -78,6 +84,7 @@ def writer(seconds, lag=None):
             "--paced", "1",
             "--lag-grains", str(LAG if lag is None else lag),
             "--seconds", str(seconds),
+            *extra,
         ]
     )
 
@@ -106,6 +113,7 @@ def output_head(flow):
 
 
 def invalid_grains(flow, count=90):
+    """Invalid output grains among the last `count` (none may come before the hold limit)."""
     proc = subprocess.run(
         [os.path.join(BUILD, "mxl-cc-sample"), "--domain", os.path.join(BASE, "cc-out"), "--flow", flow, "--count-invalid", str(count)],
         check=False,
@@ -117,6 +125,8 @@ def invalid_grains(flow, count=90):
     doc = json.loads(proc.stdout)
     if doc["checked"] < count // 2:
         raise SystemExit(f"too few output grains in the history: {doc}")
+    if doc["invalid"]:
+        print("invalid output grains", doc, "late_grains_total", metric("late_grains_total"), flush=True)
     return doc["invalid"]
 
 
@@ -131,7 +141,11 @@ def wait_until(what, pred, seconds):
 
 def main():
     global BASE, SLICE_LINES, LAG
-    for mode, lines, lag in (("running", "36", 0), ("whole_grain", "360", 0), ("running", "36", 12), ("whole_grain", "360", 12)):
+    passes = (("running", "36", 0), ("whole_grain", "360", 0), ("running", "36", 12), ("whole_grain", "360", 12))
+    only = os.environ.get("CC_REOPEN_PASSES", "")  # e.g. "running-12,whole_grain-0"
+    for mode, lines, lag in passes:
+        if only and f"{mode}-{lag}" not in only.split(","):
+            continue
         BASE = os.path.join(ROOT_TMP, f"{mode}-lag{lag}")
         SLICE_LINES = lines
         LAG = lag
@@ -191,6 +205,8 @@ def run(mode):
         cpu0, t0 = metric_plain("process_cpu_seconds_total"), time.monotonic()
         results["immediate"] = wait_until("grains from the re-created flow", lambda: metric("grains_processed_total") > base + 2, RESUME_S + 1)
         wait_until("one re-open", lambda: metric("flow_reopens_total") == 1, 2)
+        if invalid_grains(out_flow, 40):
+            raise SystemExit("invalid output grains around the re-create")
         time.sleep(1.0)
         cpu = (metric_plain("process_cpu_seconds_total") - cpu0) / (time.monotonic() - t0)
         if cpu > 0.6:
@@ -218,7 +234,7 @@ def run(mode):
         if channel()["output_flow"] != out_flow:
             raise SystemExit("the output flow changed")
         if invalid_grains(out_flow):
-            raise SystemExit(f"invalid output grains around the 1 s gap: {invalid_grains(out_flow)}")
+            raise SystemExit("invalid output grains around the 1 s gap")
 
         # 3: the writer is killed and leaves its flow: no write, the flow stays valid. Hold, and
         # follow the writer when it is back.
@@ -241,7 +257,7 @@ def run(mode):
             raise SystemExit(f"output did not continue after the kill: {k1} -> {k2}")
         results["reopens_after_kill"] = metric("flow_reopens_total") - reopens
         if invalid_grains(out_flow):
-            raise SystemExit(f"invalid output grains around the kill: {invalid_grains(out_flow)}")
+            raise SystemExit("invalid output grains around the kill")
 
         # 4: gone for longer than CC_HOLD_MAX_S: black, flagged invalid, state no_signal.
         reopens = metric("flow_reopens_total")
@@ -279,6 +295,27 @@ def run(mode):
         output_head(out_flow)
         if any(b < a for a, b in zip(heads, heads[1:])):
             raise SystemExit(f"the output head went back: {heads}")
+
+        # 4b: away for 2 s (the whole domain in the lagging passes), then back: read within 0.15 s
+        # of the flow's data file appearing, at any point of the retry schedule.
+        fifth.wait(timeout=10)
+        if LAG:
+            shutil.rmtree(os.path.join(BASE, "src"))
+        time.sleep(2.0)
+        # With the domain made again, domain_def.json comes 300 ms after the flow: the flow is
+        # complete only then (1.2.1 waited for its next retry, up to 1 s).
+        ready = os.path.join(BASE, "src", "domain_def.json") if LAG else os.path.join(BASE, "src", FLOW + ".mxl-flow", "data")
+        base = metric("grains_processed_total")
+        fifth = writer(3, extra=("--late-domain-def", "300") if LAG else ())
+        procs.append(fifth)
+        start = time.monotonic()
+        while not os.path.exists(ready):
+            if time.monotonic() - start > 5:
+                raise SystemExit("the writer did not make its flow")
+            time.sleep(0.002)
+        results["reappear_2s"] = wait_until("grains after a 2 s absence", lambda: metric("grains_processed_total") > base, 1.5)
+        if results["reappear_2s"] > REAPPEAR_S:
+            raise SystemExit(f"grains came back {results['reappear_2s']:.3f} s after the flow reappeared, more than {REAPPEAR_S} s")
 
         if LAG == 0:
             # 5: a writer 37 s behind the clock replaces it. The output is made again in its timing.

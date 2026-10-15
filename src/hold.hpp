@@ -34,12 +34,25 @@ inline constexpr std::uint64_t kCatchUpMargin = 8;
     return static_cast<std::int64_t>(committedIndex) - static_cast<std::int64_t>(currentIndex);
 }
 
+// How many grains one fill may write (a gap before the next output grain, or the start of a hold):
+// about the catch-up (twice it, 42 grains at 50p) and at most kFillBudgetBytes, so a fill never
+// blocks the channel long (2160p v210 is about 22 MB a grain). The older grains of a longer gap
+// stay unwritten and MXL marks them invalid; readers that follow the head read only the newest.
+inline constexpr std::uint64_t kFillBudgetBytes = 256ull << 20;
+[[nodiscard]] inline std::uint64_t fillCap(std::uint64_t catchUp, std::size_t grainBytes)
+{
+    std::uint64_t const byGrains = 2 * std::max<std::uint64_t>(catchUp, 1);
+    std::uint64_t const byBytes = grainBytes > 0 ? kFillBudgetBytes / grainBytes : byGrains;
+    return std::max<std::uint64_t>(1, std::min(byGrains, byBytes));
+}
+
 // The held grains to write now: [first, last], empty when first > last.
 struct Range
 {
     std::uint64_t first = 1;
     std::uint64_t last = 0;
 };
+// At most `catchUp` grains, the newest.
 [[nodiscard]] inline Range heldRange(std::uint64_t currentIndex, std::int64_t phase, std::uint64_t lastOut, std::uint64_t catchUp)
 {
     if (currentIndex == kUndefined || lastOut == kUndefined) return {};
@@ -47,7 +60,17 @@ struct Range
     if (signedTarget <= 0) return {};
     auto const target = static_cast<std::uint64_t>(signedTarget);
     if (target <= lastOut) return {};
-    return {target - lastOut > catchUp ? target : lastOut + 1, target};
+    return {target - lastOut > catchUp ? target - catchUp + 1 : lastOut + 1, target};
+}
+
+// The grains to fill before writing output grain `next`, so the output has no hole: MXL marks
+// every grain a writer skips invalid, which a reader takes as no signal. At most `ring` grains,
+// the newest (see fillCap).
+[[nodiscard]] inline Range fillRange(std::uint64_t lastOut, std::uint64_t next, std::uint64_t ring)
+{
+    if (lastOut == kUndefined || next == kUndefined || next <= lastOut + 1) return {};
+    auto const first = next - lastOut - 1 > ring ? next - ring : lastOut + 1;
+    return {first, next - 1};
 }
 
 // Where the output resumes once the source has a head again. MXL refuses a grain at or below the

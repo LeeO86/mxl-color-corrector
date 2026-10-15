@@ -203,8 +203,14 @@ reader still holds the old file; its head stands, and a read past it returns
   least 20 ms) and the flow's data file is gone or has another inode (checked every 20 ms
   while the head stands; the channel waits on the head, so it would not read past it by
   itself). While the flow is missing it tries again after 100, 200 and 500 ms, then every
-  second, and checks every 20 ms whether the flow's data file is back, which it then opens at
-  once. Any other failed read does the same (`mxl_reader_error`, `reason=read_error`).
+  second. For the whole time it is missing, it also looks every 20 ms at the flow's files: the
+  domain's `domain_def.json`, the flow directory and its data file (inodes, three `stat` calls).
+  When they change and the flow is there, it opens the flow at once (1.2.2; 1.2.1 looked only
+  after an attempt that found no data file). MXL publishes a flow directory with a rename, so a
+  flow that is back is complete. The slower retries are left for a flow that is there but does
+  not open. A route to a flow that is not there yet is opened in the same way, as soon as the
+  flow shows up in a known domain. Any other failed read re-opens the source the same way
+  (`mxl_reader_error`, `reason=read_error`).
 - **Stall.** A writer that stops without deleting its flow (killed, flow directory left) leaves
   a valid flow that is no longer written. After no write (slice commits count) for ten grain
   periods, at least 250 ms, the channel holds (`mxl_source_stalled`). A writer that pauses
@@ -214,9 +220,15 @@ reader still holds the old file; its head stands, and a read past it returns
   at the grain rate, in the output's own timing: the held grains keep the distance to the
   grain clock that the output had at its last grain (`hold.hpp`), also for a source that
   indexes behind the clock (a gateway indexing by capture time) or ahead of it. When the hold
-  starts it fills in the time since the last output grain (up to the stall threshold plus 8
-  grains), so no grain is skipped and none is flagged invalid before the limit. The same applies
-  right after the resume: a hole there is filled with the held picture.
+  starts it fills in the time since the last output grain (within the fill cap, below).
+- **No holes.** MXL marks every grain a writer skips `MXL_GRAIN_FLAG_INVALID`, and readers take
+  that as no signal. So whenever the next output grain is more than one past the last, the gap is
+  filled with the last output grain (`output_gap_filled`, at most every 5 s; 1.2.2). One fill
+  writes at most twice the catch-up (42 grains at 50p) and at most 256 MB (12 grains at 2160p),
+  the newest grains, so it never blocks the channel long. The older grains of a longer gap stay
+  invalid; readers that follow the head never reach them. This covers the channel falling behind
+  (the late check jumps to the head), a source grain that is skipped, the start of a hold, and
+  the resume after it. A source grain flagged invalid is passed through as it is (§5.1).
 - **Limit.** After `CC_HOLD_MAX_S` (default 10 s; 0 holds forever) the held picture turns
   black (Y 64, Cb and Cr 512) and the grains carry `MXL_GRAIN_FLAG_INVALID`
   (state `no_signal`, log `mxl_hold_expired`). The output flow keeps its grain rate. MXL
@@ -402,7 +414,10 @@ same id, §5.3; 1.2.1); `channel_state` has the states `holding` and `no_signal`
   it is reported. `tests/integration/reopen.py` (1.2.1): in slice and whole-grain
   mode, with a writer on the clock and one 12 grains behind it, the source writer stops and
   starts again under the same flow id (at once and after 1 s), is killed and started again,
-  and stays away past `CC_HOLD_MAX_S` (2 s there). The channel reads the new flow within 1 s
+  stays away past `CC_HOLD_MAX_S` (2 s there), and stays away 2 s and must be read within
+  0.15 s of its data file appearing. In the lagging passes the whole domain directory is
+  removed and made again with `domain_def.json` 300 ms after the flow, and the flow must be read
+  within 0.15 s of that (1.2.2). The channel reads the new flow within 1 s
   each time and counts one re-open per re-created flow. Its output head advances while the
   source is away, turns black and invalid after the limit, and never goes back. No output grain
   is refused, and the process stays below 0.6 cores after a re-create.

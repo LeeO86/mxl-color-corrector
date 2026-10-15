@@ -281,3 +281,45 @@ TEST_CASE("re-open schedule: at once, then 100, 200, 500 ms, then every second")
     CHECK_FALSE(schedule.active());
     CHECK(schedule.attempts() == 0);
 }
+
+TEST_CASE("flowFiles: a flow that is back, re-created or whose domain is made again shows as changed")
+{
+    TempDomain domain;
+    auto const dir = domain.dir.string();
+    auto const none = cc::flowFiles(dir, kFlow);
+    CHECK_FALSE(none.present());
+    CHECK(none.domainDef != 0);
+
+    auto writer = std::make_unique<Writer>(domain.dir);
+    auto const first = cc::flowFiles(dir, kFlow);
+    CHECK(first.present());
+    CHECK_FALSE(first == none);
+    CHECK(cc::flowFiles(dir, kFlow) == first);
+
+    // Hold a reader on it, as the channel does, so the old inodes stay in use.
+    cc::SourceReader source;
+    REQUIRE(source.open(dir, kFlow) == cc::SourceReader::Open::Ok);
+    writer->stop();
+    CHECK_FALSE(cc::flowFiles(dir, kFlow).present());
+    writer = std::make_unique<Writer>(domain.dir);
+    auto const second = cc::flowFiles(dir, kFlow);
+    CHECK(second.present());
+    CHECK_FALSE(second == first);
+
+    // The domain directory removed and made again: domain_def.json last.
+    writer->stop();
+    source.release();
+    std::filesystem::remove_all(domain.dir);
+    CHECK_FALSE(cc::flowFiles(dir, kFlow).present());
+    std::filesystem::create_directories(domain.dir);
+    std::ofstream(domain.dir / "options.json") << "{\"urn:x-mxl:option:history_duration/v1.0\": 200000000}\n";
+    std::filesystem::create_directories(domain.dir / (std::string(kFlow) + ".mxl-flow"));
+    std::ofstream(domain.dir / (std::string(kFlow) + ".mxl-flow") / "data") << "x";
+    auto const noDef = cc::flowFiles(dir, kFlow);
+    CHECK_FALSE(noDef.present());
+    std::ofstream(domain.dir / "domain_def.json") << "{\"id\":\"5e0c0c0c-0000-4000-8000-0000000000d0\"}\n";
+    auto const withDef = cc::flowFiles(dir, kFlow);
+    CHECK(withDef.present());
+    CHECK_FALSE(withDef == noDef);
+    CHECK(cc::flowFiles("", kFlow) == cc::FlowFiles{});
+}

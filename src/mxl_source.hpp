@@ -59,6 +59,20 @@ private:
     ino_t dataInode_ = 0;
 };
 
+// What says whether a flow can be opened: the inodes of the domain's domain_def.json, the flow
+// directory and its data file (0 when missing). MXL publishes a new flow directory with a rename,
+// so a flow that is back shows as a new directory inode. Three stat calls: cheap enough to look
+// every 20 ms while a flow is missing.
+struct FlowFiles
+{
+    ino_t domainDef = 0;
+    ino_t dir = 0;
+    ino_t data = 0;
+    [[nodiscard]] bool present() const { return domainDef != 0 && data != 0; }
+    bool operator==(FlowFiles const&) const = default;
+};
+[[nodiscard]] FlowFiles flowFiles(std::string const& domainDir, std::string const& flowId);
+
 // When to try again to open a flow that was deleted or re-created: at once, then after 100, 200
 // and 500 ms, then every second, counted from the first attempt's failure.
 class ReopenSchedule
