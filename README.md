@@ -89,7 +89,11 @@ Import restores channels, presets and IS-05 routes. The `settings` object in an 
 
 ## Platform
 
-The image is `ghcr.io/leeo86/mxl-color-corrector:1.2.0`, uid 1000, pod network, MXL root hostPath `/Volumes/mxl`, writable `/config`. `deploy/k8s/deployment.yaml` sets `NMOS_HOST_ADDRESS` from `status.podIP`, `MXL_CLEANUP_ON_EXIT=true`, and `terminationGracePeriodSeconds: 20`. `production-down` should SIGTERM and then see the node and this instance's domain disappear.
+The image is `ghcr.io/leeo86/mxl-color-corrector:1.2.1`, uid 1000, pod network, MXL root hostPath `/Volumes/mxl`, writable `/config`. `deploy/k8s/deployment.yaml` sets `NMOS_HOST_ADDRESS` from `status.podIP`, `MXL_CLEANUP_ON_EXIT=true`, and `terminationGracePeriodSeconds: 20`. `production-down` should SIGTERM and then see the node and this instance's domain disappear.
+
+## Re-created source flows
+
+A writer that restarts re-creates its flow under the same id (a new data file). A channel re-opens it by itself, without an IS-05 activation: at once on `MXL_ERR_FLOW_INVALID` or when the head has stood for two grain periods and the flow's file is gone or replaced, then after 100, 200 and 500 ms and every second while it is missing, and at once when its file shows up (checked every 20 ms). Meanwhile the output flow repeats its last grain at the grain rate, so downstream functions see no gap; the channel's state is `holding`. Each channel reads on an MXL instance of its own, so a re-open always gets a new reader. Logs `mxl_flow_recreated`, `mxl_flow_reopen_failed`, `mxl_flow_reopened` (`attempts`, `after_ms`), `mxl_flow_resumed` (`after_ms`, `held_grains`); metric `mxl_color_corrector_flow_reopens_total{channel}`; `flow_reopens` in the status. Details in SPECIFICATION §5.3.
 
 ## CPU code (`CC_SIMD`)
 

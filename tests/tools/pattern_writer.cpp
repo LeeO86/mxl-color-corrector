@@ -58,6 +58,8 @@ int main(int argc, char** argv)
     int sliceLines = argInt(argc, argv, "--slices", 16);
     int sleepUs = argInt(argc, argv, "--sleep-us", 50);
     int seconds = argInt(argc, argv, "--seconds", 8);
+    // 1: write each grain at its time (a real-time source); 0: as fast as the slice sleeps allow.
+    bool const paced = argInt(argc, argv, "--paced", 0) != 0;
     auto interlace = arg(argc, argv, "--interlace", "progressive");
     if (width % 2 || width < 2 || height < 1 || sliceLines < 1) return 2;
 
@@ -122,6 +124,7 @@ int main(int argc, char** argv)
     std::cerr << "{\"flow\":\"" << flowId << "\",\"domain\":\"" << domainId << "\",\"index\":" << index << "}\n";
     while (std::chrono::steady_clock::now() < until)
     {
+        while (paced && mxlGetCurrentIndex(&edit) < index && std::chrono::steady_clock::now() < until) ::usleep(1000);
         mxlGrainInfo info{};
         std::uint8_t* payload = nullptr;
         if (mxlFlowWriterOpenGrain(writer, index, &info, &payload) != MXL_STATUS_OK || payload == nullptr) break;

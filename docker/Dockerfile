@@ -18,7 +18,8 @@ COPY --from=webui /web/dist /src/web/dist
 RUN cmake -S /src -B /tmp/build -G Ninja -DCMAKE_BUILD_TYPE=Release \
     && cmake --build /tmp/build -j"$(nproc)" \
     && cmake --install /tmp/build --prefix /usr/local \
-    && /tmp/build/unit-tests
+    && /tmp/build/unit-tests \
+    && /tmp/build/unit-tests-mxl
 
 FROM ubuntu:24.04 AS runtime
 ARG MXL_REF=218ddaa0a08c12ffe75fc475ae65aa3d9eef16d7

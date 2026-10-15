@@ -1,6 +1,6 @@
 <script setup>
 // Status (SPECIFICATION.md §8, §9): the probes, versions, and per channel the state and the counters of
-// /metrics (grains, late grains, clipping, added latency, processing time, setting changes).
+// /metrics (grains, late grains, clipping, added latency, processing time, setting changes, flow re-opens).
 import { computed, onMounted, onUnmounted, ref } from "vue";
 import Pill from "./Pill.vue";
 import { STATE_TEXT, api, fmtFormat, modeText, parseMetrics, probe, stateKind } from "../api.js";
@@ -79,6 +79,7 @@ const nmos = computed(() => live.status?.nmos || {});
           <th class="num" title="input slice visible to output slice commit, mean since start">Added ms</th>
           <th class="num" title="colour processing per grain, mean since start">Processing ms</th>
           <th class="num">Changes</th>
+          <th class="num" title="source flows re-opened after they were deleted or re-created under the same id">Re-opens</th>
           <th>Bypass</th>
           <th>A/B</th>
         </tr>
@@ -96,6 +97,7 @@ const nmos = computed(() => live.status?.nmos || {});
           <td class="num">{{ mean(c, "added_latency_seconds") }}</td>
           <td class="num">{{ mean(c, "processing_seconds") }}</td>
           <td class="num">{{ num(m(c).settings_changes_total) }}</td>
+          <td class="num">{{ num(m(c).flow_reopens_total) }}</td>
           <td><Pill :text="c.bypass ? 'on' : 'off'" :kind="c.bypass ? 'warn' : 'neutral'" /></td>
           <td>{{ c.ab.toUpperCase() }}</td>
         </tr>

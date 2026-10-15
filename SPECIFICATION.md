@@ -191,6 +191,36 @@ Both views set the same parameters, the three trims, and always show the same st
   the flow's colorimetry from `flow_def.json` is checked and a warning is shown if
   it is not BT.709.
 
+### 5.3 Re-created source flow (1.2.1)
+
+A writer that restarts (a test player, a camera gateway) re-creates its flow under the same
+id: MXL deletes the flow with its last writer, and the new writer makes a new data file. A
+reader still holds the old file; its head stands, and a read past it returns
+`MXL_ERR_FLOW_INVALID` (MXL `218ddaa`, `PosixDiscreteFlowReader.cpp:96-104`, `244-254`).
+
+- The channel re-opens the source at once, without an IS-05 activation, when a read returns
+  `MXL_ERR_FLOW_INVALID`, or when the head has stood for two grain periods (at least 20 ms)
+  and the flow's data file is gone or has another inode (checked every 20 ms while the head
+  stands; the channel waits on the head, so it would not read past it by itself).
+- While the flow is missing it tries again after 100, 200 and 500 ms, then every second, and
+  checks every 20 ms whether the flow's data file is back, which it then opens at once.
+- Meanwhile the output flow keeps going: the channel repeats its last output grain at the
+  grain rate (state `holding`), and the first grain of the new flow follows the held ones
+  (the output index never goes back). A re-created flow with another format mints a new
+  output flow id (§6).
+- Each channel reads on an MXL instance of its own. MXL gives the same reader back for a flow
+  id while anyone holds it on that instance (`Instance.cpp:121-143`), so a channel re-opening
+  a flow that another channel also reads would get the stale reader back on a shared instance.
+  The instance follows the route's domain and is made again when the domain directory was
+  removed and made again.
+- Logs `mxl_flow_recreated` (once per event, with `reason=flow_invalid|flow_replaced`),
+  `mxl_flow_reopen_failed` (the first failed attempt of an event), `mxl_flow_reopened`
+  (`attempts`, `after_ms`) and `mxl_flow_resumed` (`after_ms` to the new flow's head,
+  `held_grains`); metric `flow_reopens_total`.
+- A writer that stops without deleting its flow (killed, flow directory left) leaves a valid
+  flow whose head stands: the channel waits as before, without holding, and re-opens when a
+  new writer replaces the files.
+
 ---
 
 ## 6. NMOS
@@ -200,7 +230,8 @@ Both views set the same parameters, the three trims, and always show the same st
   **sender** with IS-04 Source and Flow, grouped by group hint
   `<channel label>:Video`.
 - Receiver activations are accepted even if the domain or flow does not exist yet
-  (`waiting`, retry with backoff); the IS-04 `subscription` is updated.
+  (`waiting`, retry with backoff); the IS-04 `subscription` is updated. A source flow
+  re-created under the same id is re-opened without an activation (§5.3).
 - The output flow is written into the corrector's own domain (stable ID, never a
   mirror domain). Its `flow_def.json` mirrors the input format; a change of the input
   format mints a new output flow ID and updates the IS-04 Flow and the sender's
@@ -217,7 +248,7 @@ Both views set the same parameters, the three trims, and always show the same st
 - **Channel page**: thumbnail (low-rate JPEG) of input and output side by side, with
   a split/wipe view option; the two colour wheels; sliders for gain, pedestal,
   brightness, saturation; bypass, A/B, presets, reset; state (`waiting`, `running`,
-  `whole-grain fallback`), clip indicator.
+  `whole-grain fallback`, `holding` while a re-created source is re-opened, §5.3), clip indicator.
 - **Overview**: all channels with state, routed source label, bypass/A-B state.
 - **NMOS** and **Settings** pages like the siblings.
 - 1.1.0: the LeeO86 family look (mxl-webrtc-monitor, mxl-replay, mxl-multiviewer,
@@ -299,8 +330,9 @@ Env > JSON file (`CC_CONFIG_FILE`) > defaults; invalid configuration exits 78.
 Per channel: `channel_state`, `grains_processed_total`, `slice_mode` (1/0),
 `fallback_reason` (info), `added_latency_seconds` (histogram: input slice commit →
 output slice commit), `processing_seconds` (histogram per grain),
-`late_grains_total`, `clipped_ratio`, `bypass`, `settings_changes_total`;
-process CPU. Grafana dashboard in `deploy/grafana/`.
+`late_grains_total`, `clipped_ratio`, `bypass`, `settings_changes_total`,
+`flow_reopens_total` (source flows re-opened after they were deleted or re-created under the
+same id, §5.3; 1.2.1); `channel_state` has the state `holding` (1.2.1); process CPU. Grafana dashboard in `deploy/grafana/`.
 
 ---
 
@@ -316,12 +348,18 @@ process CPU. Grafana dashboard in `deploy/grafana/`.
   - legal clipping limits; RGB gamut clip on known out-of-gamut values;
   - slice processing equals whole-grain processing byte for byte, for several
     slice layouts;
-  - settings swap happens only at grain boundaries.
+  - settings swap happens only at grain boundaries;
+  - on a real MXL domain in a temporary directory (`unit-tests-mxl`): a flow deleted and
+    re-created under the same id, at once or after a gap, before or after its first grain,
+    and with its domain directory made again, is caught as stale and read again after a
+    re-open, also while another channel holds the stale reader; the re-open schedule.
 - Integration (CI): a test writer (mxl-test-player or a small tool) produces a
   1080p50 flow with slice commits; the corrector channel is activated via IS-05;
   bars and greyscale ramp are measured at the output for a set of control changes;
   added latency stays below one frame; interlaced input triggers the fallback and
-  it is reported.
+  it is reported. `tests/integration/reopen.py` (1.2.1): the source writer stops and starts
+  again under the same flow id, at once and after 1 s; the channel reads the new flow within
+  1 s, counts one re-open each, and its output head advances while the source is missing.
 - NMOS conformance: AMWA IS-04-01, IS-05-01, IS-05-02, BCP-007-03-01.
 - Performance (documented): channels per Precision 3930 core at 1080p50 and
   2160p50, with and without RGB gamut clip.

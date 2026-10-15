@@ -17,6 +17,7 @@ char const* stateName(int state)
 {
     if (state == 1) return "running";
     if (state == 2) return "whole_grain";
+    if (state == 3) return "holding";
     return "waiting";
 }
 } // namespace
@@ -157,6 +158,13 @@ void RuntimeBoard::addSettingsChange(int channel)
     channels_[static_cast<std::size_t>(channel - 1)].settingsChanges += 1;
 }
 
+void RuntimeBoard::addFlowReopen(int channel)
+{
+    std::lock_guard lock(mu_);
+    if (channel < 1 || channel > static_cast<int>(channels_.size())) return;
+    channels_[static_cast<std::size_t>(channel - 1)].flowReopens += 1;
+}
+
 void RuntimeBoard::setPreview(int channel, std::vector<std::uint8_t> input, std::vector<std::uint8_t> output)
 {
     std::lock_guard lock(mu_);
@@ -194,14 +202,16 @@ std::string RuntimeBoard::render(double processCpuSeconds) const
     out += "# HELP mxl_color_corrector_clipped_ratio Share of clipped samples in the last second\n# TYPE mxl_color_corrector_clipped_ratio gauge\n";
     out += "# HELP mxl_color_corrector_bypass 1 when the channel is bypassed\n# TYPE mxl_color_corrector_bypass gauge\n";
     out += "# HELP mxl_color_corrector_settings_changes_total Live control changes\n# TYPE mxl_color_corrector_settings_changes_total counter\n";
+    out += "# HELP mxl_color_corrector_flow_reopens_total Source flows re-opened after they were deleted or re-created under the same id\n"
+           "# TYPE mxl_color_corrector_flow_reopens_total counter\n";
     out += "# HELP mxl_color_corrector_process_cpu_seconds_total Process CPU time\n# TYPE mxl_color_corrector_process_cpu_seconds_total counter\n";
-    char const* states[] = {"waiting", "running", "whole_grain"};
+    char const* states[] = {"waiting", "running", "whole_grain", "holding"};
     char const* reasons[] = {"none", "interlaced", "no_slice_commits", "slice_layout"};
     for (std::size_t i = 0; i < channels_.size(); ++i)
     {
         auto const& row = channels_[i];
         auto const ch = std::to_string(i + 1);
-        for (int s = 0; s < 3; ++s)
+        for (int s = 0; s < 4; ++s)
         {
             out += "mxl_color_corrector_channel_state{channel=\"" + ch + "\",state=\"" + states[s] + "\"} " +
                    std::to_string(row.state == s ? 1 : 0) + "\n";
@@ -221,6 +231,7 @@ std::string RuntimeBoard::render(double processCpuSeconds) const
         out += "mxl_color_corrector_clipped_ratio{channel=\"" + ch + "\"} " + ratio.str() + "\n";
         out += "mxl_color_corrector_bypass{channel=\"" + ch + "\"} " + std::to_string(row.bypass) + "\n";
         out += "mxl_color_corrector_settings_changes_total{channel=\"" + ch + "\"} " + std::to_string(row.settingsChanges) + "\n";
+        out += "mxl_color_corrector_flow_reopens_total{channel=\"" + ch + "\"} " + std::to_string(row.flowReopens) + "\n";
         auto labels = "channel=\"" + ch + "\"";
         row.latency.write(out, "mxl_color_corrector_added_latency_seconds", labels, "Input slice visible to output slice commit");
         row.processing.write(out, "mxl_color_corrector_processing_seconds", labels, "Colour processing time per grain");

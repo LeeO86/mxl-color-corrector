@@ -74,12 +74,13 @@ Json channelView(ControlStore& store, RuntimeBoard& runtime, NmosNode& nmos, int
     obj["channel"] = Json::number(channel);
     obj["label"] = Json::str("CC " + std::to_string(channel));
     obj["ab"] = Json::str(slots.active == 'b' ? "b" : "a");
-    char const* state = stats.state == 1 ? "running" : stats.state == 2 ? "whole_grain" : "waiting";
+    char const* state = stats.state == 1 ? "running" : stats.state == 2 ? "whole_grain" : stats.state == 3 ? "holding" : "waiting";
     obj["state"] = Json::str(state);
     obj["slice_mode"] = Json::boolean(stats.sliceMode != 0);
     obj["fallback_reason"] = Json::str(fallbackName(static_cast<FallbackReason>(stats.fallback)));
     obj["clipped_ratio"] = Json::number(stats.clippedRatio);
     obj["grains"] = Json::number(static_cast<double>(stats.grains));
+    obj["flow_reopens"] = Json::number(static_cast<double>(stats.flowReopens));
     obj["source_label"] = Json::str(stats.sourceLabel);
     obj["source_domain"] = Json::str(route.domainId);
     obj["source_flow"] = Json::str(route.flowId);

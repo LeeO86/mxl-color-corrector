@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.2.1
+
+- **A re-created source flow is re-opened at once.** A writer that restarts (a test player, a gateway) re-creates its flow under the same id with a new data file. 1.2.0 read a grain only once the old flow's head had reached it, and that head no longer moved, so the channel never saw MXL's `MXL_ERR_FLOW_INVALID` and its output stood until an IS-05 disable and enable (on small on 2026-10-15 the corrector's output froze for about 2 minutes: the multiviewer input showed `no_signal`, and the replay camera fed from it stopped recording). Now a channel re-opens the source when a read returns `MXL_ERR_FLOW_INVALID`, or when the head has stood for two grain periods and the flow's data file is gone or replaced. It tries at once, then after 100, 200 and 500 ms and every second while the flow is missing, and it opens the flow as soon as its file is back (checked every 20 ms). No IS-05 activation is needed. In the CI test the channel reads the new flow 0.09 s after the writer starts again, both at once and after a 1 s gap; 1.2.0 never read it.
+- **The output flow never stops while the source is re-opened.** The channel repeats its last output grain at the grain rate (new channel state `holding` in the status, the UI and `mxl_color_corrector_channel_state`), and the new flow's grains follow without the output index going back. A writer that is killed and leaves a valid flow behind is not held: the channel waits as before and re-opens when a new writer replaces the files.
+- Each channel reads its source on an MXL instance of its own, made again when the route's domain changes or the domain directory is made again. MXL hands out the same reader for a flow id while anyone holds it on an instance, so on the shared instance of 1.2.0 a channel could get a stale reader back while another channel read the same flow.
+- New metric `mxl_color_corrector_flow_reopens_total{channel}` (also `flow_reopens` in the status and a column in Status). New logs `mxl_flow_recreated` (`reason=flow_invalid|flow_replaced`), `mxl_flow_reopen_failed` (first failed attempt), `mxl_flow_reopened` (`attempts`, `after_ms`) and `mxl_flow_resumed` (`after_ms`, `held_grains`).
+- Tests: `unit-tests-mxl` on a real MXL domain in a temporary directory (a flow deleted and re-created at once, after a gap and before its first grain; a domain directory made again; a stale reader held by another channel; the schedule), and `tests/integration/reopen.py` (the binary with a paced pattern writer stopped and started again). `mxl-cc-pattern --paced 1` writes each grain at its time.
+- The Compose and Kubernetes examples use the `1.2.1` image. No setting changes.
+
 ## 1.2.0
 
 AVX-512 at run time and cheaper clip statistics (plan G). The output is byte for byte the same as 1.1.1's; nothing to configure.
