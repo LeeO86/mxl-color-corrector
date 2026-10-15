@@ -51,15 +51,21 @@ int main(int argc, char** argv)
         if (mxlFlowReaderGetRuntimeInfo(reader, &runtime) != MXL_STATUS_OK || runtime.headIndex == MXL_UNDEFINED_INDEX) return 1;
         int invalid = 0;
         int checked = 0;
+        std::string listed;
         for (auto i = runtime.headIndex - static_cast<std::uint64_t>(countInvalid - 1); i <= runtime.headIndex; ++i)
         {
             mxlGrainInfo grain{};
             std::uint8_t* data = nullptr;
             if (mxlFlowReaderGetGrainNonBlocking(reader, i, &grain, &data) != MXL_STATUS_OK) continue;
             ++checked;
-            if ((grain.flags & MXL_GRAIN_FLAG_INVALID) != 0) ++invalid;
+            if ((grain.flags & MXL_GRAIN_FLAG_INVALID) != 0)
+            {
+                ++invalid;
+                listed += (listed.empty() ? "" : ",") + std::to_string(runtime.headIndex - i);
+            }
         }
-        std::cout << "{\"ok\":true,\"head\":" << runtime.headIndex << ",\"checked\":" << checked << ",\"invalid\":" << invalid << "}\n";
+        std::cout << "{\"ok\":true,\"head\":" << runtime.headIndex << ",\"checked\":" << checked << ",\"invalid\":" << invalid
+                  << ",\"invalid_behind_head\":[" << listed << "]}\n";
         return 0;
     }
     mxlGrainInfo info{};

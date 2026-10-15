@@ -90,14 +90,16 @@ Import restores channels, presets and IS-05 routes. The `settings` object in an 
 
 ## Platform
 
-The image is `ghcr.io/leeo86/mxl-color-corrector:1.2.1`, uid 1000, pod network, MXL root hostPath `/Volumes/mxl`, writable `/config`. `deploy/k8s/deployment.yaml` sets `NMOS_HOST_ADDRESS` from `status.podIP`, `MXL_CLEANUP_ON_EXIT=true`, and `terminationGracePeriodSeconds: 20`. `production-down` should SIGTERM and then see the node and this instance's domain disappear.
+The image is `ghcr.io/leeo86/mxl-color-corrector:1.2.2`, uid 1000, pod network, MXL root hostPath `/Volumes/mxl`, writable `/config`. `deploy/k8s/deployment.yaml` sets `NMOS_HOST_ADDRESS` from `status.podIP`, `MXL_CLEANUP_ON_EXIT=true`, and `terminationGracePeriodSeconds: 20`. `production-down` should SIGTERM and then see the node and this instance's domain disappear.
 
 ## Source gone, stalled or re-created
 
 A writer that restarts re-creates its flow under the same id, with a new data file. A channel re-opens it by itself, without an IS-05 activation:
 - at once on `MXL_ERR_FLOW_INVALID`, or when the head has stood for two grain periods and the flow's file is gone or replaced;
 - then after 100, 200 and 500 ms, and every second while it is missing;
-- and at once when its file shows up (checked every 20 ms).
+- and at once when its files show up or change, for the whole time it is missing: its domain's `domain_def.json`, the flow directory and its data file, checked every 20 ms (three `stat` calls). The slower retries are left for flows that are there but do not open.
+
+A route to a flow that is not there yet (for example the corrector started before its source) is opened as soon as the flow shows up in a known domain, not after the next backoff step.
 
 A source that is still there but no longer written (a killed writer leaves its flow) counts as stalled after ten grain periods (at least 250 ms) without a write. A writer that pauses for less and catches up loses nothing.
 

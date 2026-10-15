@@ -80,6 +80,21 @@ bool SourceReader::valid() const
     return dataInode_ != 0 && ::stat(dataPath_.c_str(), &now) == 0 && now.st_ino == dataInode_;
 }
 
+FlowFiles flowFiles(std::string const& domainDir, std::string const& flowId)
+{
+    auto inode = [](std::string const& path) -> ino_t {
+        struct stat st{};
+        return ::stat(path.c_str(), &st) == 0 ? st.st_ino : 0;
+    };
+    FlowFiles files;
+    if (domainDir.empty()) return files;
+    auto const flowDir = domainDir + "/" + flowId + ".mxl-flow";
+    files.domainDef = inode(domainDir + "/domain_def.json");
+    files.dir = inode(flowDir);
+    files.data = inode(flowDir + "/data");
+    return files;
+}
+
 double ReopenSchedule::delayAfter(int failures)
 {
     if (failures <= 1) return 0.1;

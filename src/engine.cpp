@@ -300,7 +300,10 @@ struct Engine::Impl
         double lostAt = 0;
         bool resumePending = false;
         std::string sourceDir;     // the source domain's directory at the last open
-        std::string watchPath;     // a missing flow's data file, checked every 20 ms between attempts
+        // While a flow cannot be opened, its files are looked at every 20 ms; when they change and
+        // the flow is there, it is opened at once. The slower retries are for real open failures.
+        std::string watchDir;      // the source domain's directory (scanned, or the last known)
+        FlowFiles watchFiles;      // the flow's files at the last failed attempt
         double watchDue = 0;
         std::uint64_t lastOut = MXL_UNDEFINED_INDEX; // last whole output grain committed
         bool holding = false;
@@ -349,7 +352,19 @@ struct Engine::Impl
             closeWriter();
             reopen.reset();
             resumePending = false;
-            watchPath.clear();
+            watchDir.clear();
+        };
+        // Whether the flow's files changed since the last failed attempt and the flow is there.
+        auto flowBack = [&](std::string const& flowId, double now) {
+            if (watchDir.empty() || now < watchDue) return false;
+            watchDue = now + 0.02;
+            auto const files = flowFiles(watchDir, flowId);
+            return files.present() && !(files == watchFiles);
+        };
+        auto watchFrom = [&](std::string const& dir, std::string const& flowId, double now) {
+            watchDir = dir;
+            watchFiles = flowFiles(watchDir, flowId);
+            watchDue = now + 0.02;
         };
         // The last whole output grain, read back from this channel's own output flow.
         auto captureHeld = [&] {
@@ -479,15 +494,7 @@ struct Engine::Impl
                 if (reopen.active() && !reopen.due(now))
                 {
                     // A flow that comes back between two attempts is opened at once.
-                    bool appeared = false;
-                    if (!watchPath.empty() && now >= watchDue)
-                    {
-                        watchDue = now + 0.02;
-                        struct stat st{};
-                        appeared = ::stat(watchPath.c_str(), &st) == 0;
-                        if (appeared) watchPath.clear();
-                    }
-                    if (!appeared)
+                    if (!flowBack(route.flowId, now))
                     {
                         emitHeld();
                         runtime.setState(channel, idle, 0, 0);
@@ -530,25 +537,26 @@ struct Engine::Impl
                             logInfo("mxl_flow_reopen_failed channel=" + ch + " source=" + key + " reason=" + why + ", retrying at 100, 200, 500 ms, then every 1 s");
                         }
                         reopen.failed(now);
-                        watchPath.clear();
-                        auto const dir = it != map.end() ? it->second : sourceDir;
-                        if (!dir.empty())
-                        {
-                            auto const data = (std::filesystem::path(dir) / (route.flowId + ".mxl-flow") / "data").string();
-                            struct stat st{};
-                            if (::stat(data.c_str(), &st) != 0) watchPath = data;
-                        }
-                        watchDue = now + 0.02;
+                        watchFrom(it != map.end() ? it->second : sourceDir, route.flowId, now);
                         emitHeld();
                         continue;
                     }
-                    std::this_thread::sleep_for(std::chrono::milliseconds(backoffMs));
+                    // Not routed to a flow before (or a writer failure): back off, but open a flow
+                    // of a known domain as soon as it shows up.
+                    watchFrom(it != map.end() ? it->second : sourceDir, route.flowId, now);
+                    auto const until = now + backoffMs / 1000.0;
+                    while (!stop.load() && monoNow() < until && !flowBack(route.flowId, monoNow()))
+                    {
+                        auto const again = nmos.route(channel);
+                        if (!again.enable || again.domainId + "/" + again.flowId != key) break;
+                        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+                    }
                     backoffMs = std::min(2000, backoffMs * 2);
                     continue;
                 }
                 reader = source.reader();
                 sourceDir = it->second;
-                watchPath.clear();
+                watchDir.clear();
                 if (reopen.active())
                 {
                     logInfo("mxl_flow_reopened channel=" + ch + " source=" + key + " attempts=" + std::to_string(reopen.attempts() + 1) +

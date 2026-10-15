@@ -62,14 +62,17 @@ int main(int argc, char** argv)
     bool const paced = argInt(argc, argv, "--paced", 0) != 0;
     // Index grains this many grains behind the clock, as a gateway indexing by capture time does.
     int const lagGrains = argInt(argc, argv, "--lag-grains", 0);
+    // Write domain_def.json only this long after the flow (a domain made again in that order).
+    int const lateDomainDefMs = argInt(argc, argv, "--late-domain-def", 0);
     auto interlace = arg(argc, argv, "--interlace", "progressive");
     if (width % 2 || width < 2 || height < 1 || sliceLines < 1) return 2;
 
     std::filesystem::create_directories(domain);
-    {
+    auto writeDomainDef = [&] {
         std::ofstream out(std::filesystem::path(domain) / "domain_def.json");
         out << "{\"id\":\"" << domainId << "\",\"label\":\"cc-pattern\"}\n";
-    }
+    };
+    if (lateDomainDefMs <= 0) writeDomainDef();
     {
         std::ofstream out(std::filesystem::path(domain) / "options.json");
         out << "{\"urn:x-mxl:option:history_duration/v1.0\": 200000000}\n";
@@ -94,6 +97,11 @@ int main(int argc, char** argv)
     {
         std::cerr << "mxlCreateFlowWriter failed\n";
         return 1;
+    }
+    if (lateDomainDefMs > 0)
+    {
+        ::usleep(static_cast<useconds_t>(lateDomainDefMs) * 1000);
+        writeDomainDef();
     }
     int const stride = cc::v210Stride(width);
     std::vector<std::uint8_t> frame(static_cast<std::size_t>(stride * height));
