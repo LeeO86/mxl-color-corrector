@@ -701,7 +701,8 @@ struct Engine::Impl
             }
             if (!synced)
             {
-                if (head == MXL_UNDEFINED_INDEX)
+                // A new flow shows head 0 until its first grain (its flow info starts zeroed); hold on.
+                if (head == MXL_UNDEFINED_INDEX || head == 0)
                 {
                     emitHeld();
                     std::this_thread::sleep_for(std::chrono::milliseconds(5));
