@@ -103,7 +103,7 @@ A source that is still there but no longer written (a killed writer leaves its f
 
 While the source is gone or stalled, the output repeats its last grain at the grain rate, in its own timing, and the state is `holding`. After `CC_HOLD_MAX_S` (default 10 s; 0 holds forever) the picture turns black and the grains are flagged invalid. The state is then `no_signal`, so a multiviewer raises its no-signal alarm and replay stops recording.
 
-Output indices only go up. A source that comes back later than the held grains is waited for; the output then pauses for the difference.
+Output indices only go up. A source that comes back a little later than the held grains (up to the stall threshold plus 8 grains) is waited for, and the output pauses for the difference. A source further behind (for example a writer indexing by UTC, 37 s behind TAI) gets the output flow made again in its own timing (`mxl_output_recreated`), which readers re-open.
 
 Each channel reads on an MXL instance of its own, so a re-open always gets a new reader.
 
@@ -113,7 +113,8 @@ Logs:
 - `mxl_reader_error` (`reason=read_error`);
 - `mxl_flow_reopen_failed`;
 - `mxl_flow_reopened` (`attempts`, `after_ms`);
-- `mxl_flow_resume_waiting`;
+- `mxl_flow_resume_waiting` (`lag_grains`);
+- `mxl_output_recreated` (`lag_grains`);
 - `mxl_flow_resumed` (`after_ms`, `held_grains`);
 - `mxl_hold_expired`.
 

@@ -7,6 +7,9 @@ A paced pattern writer feeds channel 1.
 3. It is killed and leaves its flow behind: no write, the flow stays valid; the output holds.
 4. It stops for longer than CC_HOLD_MAX_S (2 s here): the output turns black, flagged invalid
    (state no_signal), and resumes when the writer is back.
+5. (writer on the clock only) A writer 37 s behind the clock (indexing by UTC) replaces it: the
+   output cannot go back, so the output flow is made again in its timing.
+Until the hold limit, no output grain is flagged invalid (the hold fills in the stall time).
 Each time the channel must read the new flow within 1 s without an IS-05 activation, and the
 output head must keep going and never go back. Four passes: slice and whole-grain mode, each
 with a writer on the clock and one 12 grains behind it (a gateway indexing by capture time).
@@ -60,7 +63,7 @@ def channel():
     return json.loads(http("GET", "/api/v1/status")[1])["channels"][0]
 
 
-def writer(seconds):
+def writer(seconds, lag=None):
     return subprocess.Popen(
         [
             os.path.join(BUILD, "mxl-cc-pattern"),
@@ -73,7 +76,7 @@ def writer(seconds):
             "--slices", SLICE_LINES,
             "--sleep-us", "200",
             "--paced", "1",
-            "--lag-grains", str(LAG),
+            "--lag-grains", str(LAG if lag is None else lag),
             "--seconds", str(seconds),
         ]
     )
@@ -100,6 +103,21 @@ def output_head(flow):
         return None
     heads.append(doc["index"])
     return doc["index"]
+
+
+def invalid_grains(flow, count=90):
+    proc = subprocess.run(
+        [os.path.join(BUILD, "mxl-cc-sample"), "--domain", os.path.join(BASE, "cc-out"), "--flow", flow, "--count-invalid", str(count)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        raise SystemExit("count-invalid failed: " + proc.stderr)
+    doc = json.loads(proc.stdout)
+    if doc["checked"] < count // 2:
+        raise SystemExit(f"too few output grains in the history: {doc}")
+    return doc["invalid"]
 
 
 def wait_until(what, pred, seconds):
@@ -139,6 +157,8 @@ def run(mode):
             "NMOS_DNS_SD": "false",
             "CC_LOG_LEVEL": "info",
             "CC_HOLD_MAX_S": "2",
+            # 2 s of output history, so the invalid-grain check covers a whole hold.
+            "MXL_HISTORY_DURATION_NS": "2000000000",
         }
     )
     first = writer(4)
@@ -197,6 +217,8 @@ def run(mode):
             raise SystemExit(f"output did not continue after the re-open: {h1} -> {h2}")
         if channel()["output_flow"] != out_flow:
             raise SystemExit("the output flow changed")
+        if invalid_grains(out_flow):
+            raise SystemExit(f"invalid output grains around the 1 s gap: {invalid_grains(out_flow)}")
 
         # 3: the writer is killed and leaves its flow: no write, the flow stays valid. Hold, and
         # follow the writer when it is back.
@@ -218,6 +240,8 @@ def run(mode):
         if k2 is None or k2 <= k1:
             raise SystemExit(f"output did not continue after the kill: {k1} -> {k2}")
         results["reopens_after_kill"] = metric("flow_reopens_total") - reopens
+        if invalid_grains(out_flow):
+            raise SystemExit(f"invalid output grains around the kill: {invalid_grains(out_flow)}")
 
         # 4: gone for longer than CC_HOLD_MAX_S: black, flagged invalid, state no_signal.
         reopens = metric("flow_reopens_total")
@@ -255,6 +279,25 @@ def run(mode):
         output_head(out_flow)
         if any(b < a for a, b in zip(heads, heads[1:])):
             raise SystemExit(f"the output head went back: {heads}")
+
+        if LAG == 0:
+            # 5: a writer 37 s behind the clock replaces it. The output is made again in its timing.
+            fifth.wait(timeout=10)
+            wait_until("holding", lambda: channel()["state"] == "holding", 1)
+            reopens = metric("flow_reopens_total")
+            sixth = writer(3, lag=1850)
+            procs.append(sixth)
+            base = metric("grains_processed_total")
+            results["after_utc_writer"] = wait_until("grains from a writer 37 s behind", lambda: metric("grains_processed_total") > base + 2, RESUME_S + 1)
+            wait_until(mode, lambda: channel()["state"] == mode, 1)
+            u = output_head(out_flow)
+            if u is None or u > heads[-2] - 1000:
+                raise SystemExit(f"output not in the late writer's timing: {heads[-2]} -> {u}")
+            if channel()["output_flow"] != out_flow:
+                raise SystemExit("the output flow id changed")
+            log.flush()
+            if "mxl_output_recreated" not in open(log_path).read():
+                raise SystemExit("expected mxl_output_recreated")
         log.flush()
         text = open(log_path).read()
         for event in ("mxl_flow_recreated", "mxl_flow_reopened", "mxl_flow_resumed", "mxl_source_stalled", "mxl_hold_expired"):

@@ -3,6 +3,7 @@
 // The held output of a channel whose source is gone or stalled (SPECIFICATION §5.3): which
 // indices to write, where the output resumes, and when the held picture turns black.
 
+#include <cmath>
 #include <cstdint>
 #include <vector>
 
@@ -11,9 +12,18 @@ namespace cc::hold
 
 inline constexpr std::uint64_t kUndefined = UINT64_MAX;
 
-// Held grains catch up at most this many grains; a longer gap jumps to the target (MXL marks the
-// skipped grains invalid).
-inline constexpr std::uint64_t kCatchUp = 8;
+// Margin of the catch-up below, in grains.
+inline constexpr std::uint64_t kCatchUpMargin = 8;
+
+// How many grains the held output fills in when it starts (the time from the last output grain to
+// the hold: up to the stall threshold), plus a margin. A longer gap jumps to the target, and MXL
+// marks the skipped grains invalid, which a reader takes as no signal. The same bound is the
+// longest the channel waits for a source behind the held grains.
+[[nodiscard]] inline std::uint64_t catchUpGrains(double stallSeconds, int rateNum, int rateDen)
+{
+    double const rate = rateDen > 0 && rateNum > 0 ? static_cast<double>(rateNum) / rateDen : 50.0;
+    return static_cast<std::uint64_t>(std::ceil(stallSeconds * rate)) + kCatchUpMargin;
+}
 
 // The output's position against the grain clock (mxlGetCurrentIndex), measured at its last
 // committed grain: index − current index. Negative for a source behind TAI (a gateway indexing by
@@ -30,35 +40,47 @@ struct Range
     std::uint64_t first = 1;
     std::uint64_t last = 0;
 };
-[[nodiscard]] inline Range heldRange(std::uint64_t currentIndex, std::int64_t phase, std::uint64_t lastOut)
+[[nodiscard]] inline Range heldRange(std::uint64_t currentIndex, std::int64_t phase, std::uint64_t lastOut, std::uint64_t catchUp)
 {
     if (currentIndex == kUndefined || lastOut == kUndefined) return {};
     auto const signedTarget = static_cast<std::int64_t>(currentIndex) + phase;
     if (signedTarget <= 0) return {};
     auto const target = static_cast<std::uint64_t>(signedTarget);
     if (target <= lastOut) return {};
-    return {target - lastOut > kCatchUp ? target : lastOut + 1, target};
+    return {target - lastOut > catchUp ? target : lastOut + 1, target};
 }
 
 // Where the output resumes once the source has a head again. MXL refuses a grain at or below the
-// last one committed (PosixDiscreteFlowWriter::openGrain → MXL_ERR_INVALID_ARG), so the result is
-// always above lastOut. While the output is held and the source's next grain is not past the held
-// ones (it runs later than the old source did), the channel waits for it: wait = true.
+// last one committed (PosixDiscreteFlowWriter::openGrain → MXL_ERR_INVALID_ARG), so a read is
+// always above lastOut.
+// - Read: from `index`.
+// - Wait: the source's next grain is not past the held ones, but within `catchUp` grains (it runs a
+//   little later than the old source did); it catches up within that many grains.
+// - Rephase: the source runs more than `catchUp` grains behind the output (a writer indexing by
+//   UTC instead of TAI is 37 s behind). It would never catch up while the output keeps its timing,
+//   and the output cannot go back, so the output flow is made again in the source's timing.
+//   `lag` is the distance in grains.
+enum class Action
+{
+    Read,
+    Wait,
+    Rephase,
+};
 struct Resume
 {
-    bool wait = false;
+    Action action = Action::Read;
     std::uint64_t index = 0;
+    std::uint64_t lag = 0;
+    [[nodiscard]] bool wait() const { return action == Action::Wait; }
 };
-[[nodiscard]] inline Resume resumeAt(std::uint64_t head, int wholeGrainOffset, bool slice, std::uint64_t lastOut, bool holding)
+[[nodiscard]] inline Resume resumeAt(std::uint64_t head, int wholeGrainOffset, bool slice, std::uint64_t lastOut, std::uint64_t catchUp)
 {
     auto const offset = static_cast<std::uint64_t>(wholeGrainOffset > 0 ? wholeGrainOffset : 0);
-    std::uint64_t start = slice || head < offset ? head : head - offset;
-    if (lastOut != kUndefined && start <= lastOut)
-    {
-        if (holding) return {true, lastOut + 1};
-        start = lastOut + 1;
-    }
-    return {false, start};
+    std::uint64_t const start = slice || head < offset ? head : head - offset;
+    if (lastOut == kUndefined || start > lastOut) return {Action::Read, start, 0};
+    auto const lag = lastOut + 1 - start;
+    if (lag > catchUp) return {Action::Rephase, start, lag};
+    return {Action::Wait, lastOut + 1, lag};
 }
 
 // Whether a hold that started at `since` has run past CC_HOLD_MAX_S (0 = never).

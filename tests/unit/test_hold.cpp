@@ -13,24 +13,25 @@ using namespace cc;
 
 TEST_CASE("held grains keep the output's phase, also for a source behind the clock")
 {
+    constexpr std::uint64_t kUp = 8;
     // A gateway indexing by capture time: its grains are 12 behind the clock, so the output
     // committed grain 988 when the clock was at 1000.
     auto const phase = hold::phaseOf(988, 1000);
     CHECK(phase == -12);
-    auto range = hold::heldRange(1003, phase, 988);
+    auto range = hold::heldRange(1003, phase, 988, kUp);
     CHECK(range.first == 989);
     CHECK(range.last == 991);
     // Nothing to write while the clock has not moved on.
-    range = hold::heldRange(1000, phase, 988);
+    range = hold::heldRange(1000, phase, 988, kUp);
     CHECK(range.first > range.last);
     // A long gap jumps to the target instead of writing every grain.
-    range = hold::heldRange(2000, phase, 988);
+    range = hold::heldRange(2000, phase, 988, kUp);
     CHECK(range.first == 1988);
     CHECK(range.last == 1988);
     // A source ahead of the clock.
-    CHECK(hold::heldRange(1000, 5, 1003).first == 1004);
-    CHECK(hold::heldRange(1000, 5, 1003).last == 1005);
-    CHECK(hold::heldRange(hold::kUndefined, 0, 10).first > hold::heldRange(hold::kUndefined, 0, 10).last);
+    CHECK(hold::heldRange(1000, 5, 1003, kUp).first == 1004);
+    CHECK(hold::heldRange(1000, 5, 1003, kUp).last == 1005);
+    CHECK(hold::heldRange(hold::kUndefined, 0, 10, kUp).first > hold::heldRange(hold::kUndefined, 0, 10, kUp).last);
 }
 
 TEST_CASE("a re-created source 12 grains behind the clock resumes after the held grains, never below them")
@@ -45,7 +46,7 @@ TEST_CASE("a re-created source 12 grains behind the clock resumes after the held
     for (int i = 0; i < 50; ++i)
     {
         ++clock;
-        auto const range = hold::heldRange(clock, phase, lastOut);
+        auto const range = hold::heldRange(clock, phase, lastOut, 21);
         for (auto next = range.first; next <= range.last; ++next)
         {
             CHECK(next > lastOut);
@@ -58,20 +59,27 @@ TEST_CASE("a re-created source 12 grains behind the clock resumes after the held
     hold::Resume resume;
     for (;; ++clock, ++waits)
     {
-        resume = hold::resumeAt(clock - lag, 1, false, lastOut, true);
-        if (!resume.wait) break;
+        resume = hold::resumeAt(clock - lag, 1, false, lastOut, 21);
+        if (!resume.wait()) break;
         REQUIRE(waits < 3);
     }
+    CHECK(resume.action == hold::Action::Read);
     CHECK(resume.index > lastOut);
     CHECK(resume.index == lastOut + 1);
     CHECK(waits <= 1);
 
     // The new writer runs 10 grains later than the old one: the channel waits for it (10 grains
     // without output) rather than going back.
-    auto const later = hold::resumeAt(clock - lag - 10, 1, false, lastOut, true);
-    CHECK(later.wait);
+    auto const later = hold::resumeAt(clock - lag - 10, 1, false, lastOut, 21);
+    CHECK(later.wait());
+    CHECK(later.lag == 10);
+    // A writer indexing by UTC, 37 s (1850 grains) behind: the output flow is made again.
+    auto const utc = hold::resumeAt(clock - lag - 1850, 1, false, lastOut, 21);
+    CHECK(utc.action == hold::Action::Rephase);
+    CHECK(utc.lag == 1850);
+    CHECK(utc.index == clock - lag - 1851);
     // In slice mode the head itself is read.
-    CHECK(hold::resumeAt(lastOut + 1, 1, true, lastOut, true).index == lastOut + 1);
+    CHECK(hold::resumeAt(lastOut + 1, 1, true, lastOut, 21).index == lastOut + 1);
 }
 
 TEST_CASE("resume never goes at or below the last committed grain")
@@ -83,14 +91,15 @@ TEST_CASE("resume never goes at or below the last committed grain")
         std::uint64_t const head = 900 + rng() % 1200;
         int const offset = static_cast<int>(rng() % 3);
         bool const slice = (rng() & 1) != 0;
-        bool const holding = (rng() & 2) != 0;
-        auto const resume = hold::resumeAt(head, offset, slice, lastOut, holding);
-        if (!resume.wait) CHECK(resume.index > lastOut);
-        if (resume.wait) CHECK(holding);
+        std::uint64_t const up = 8 + rng() % 30;
+        auto const resume = hold::resumeAt(head, offset, slice, lastOut, up);
+        if (resume.action != hold::Action::Rephase) CHECK(resume.index > lastOut);
+        if (resume.action == hold::Action::Wait) CHECK(resume.lag <= up);
+        if (resume.action == hold::Action::Rephase) CHECK(resume.lag > up);
     }
     // Without an output yet, the head (less the whole-grain offset) is read.
-    CHECK(hold::resumeAt(500, 1, false, hold::kUndefined, false).index == 499);
-    CHECK(hold::resumeAt(500, 1, true, hold::kUndefined, false).index == 500);
+    CHECK(hold::resumeAt(500, 1, false, hold::kUndefined, 21).index == 499);
+    CHECK(hold::resumeAt(500, 1, true, hold::kUndefined, 21).index == 500);
 }
 
 TEST_CASE("CC_HOLD_MAX_S: the hold turns black after the limit, 0 holds forever")
@@ -120,4 +129,19 @@ TEST_CASE("black v210 is Y 64, Cb and Cr 512 on every line, padding untouched")
         }
         for (std::size_t i = static_cast<std::size_t>(stride) * height; i < size; ++i) CHECK(frame[i] == 0);
     }
+}
+
+TEST_CASE("the hold fills in the stall time without a jump, so no grain is marked invalid")
+{
+    // 1080p50: the stall hold starts 250 ms (12.5 grains) after the last write; the first held
+    // grains must follow the last output grain, not jump (MXL would mark the skipped ones invalid).
+    auto const up50 = hold::catchUpGrains(0.25, 50, 1);
+    CHECK(up50 >= 13 + hold::kCatchUpMargin);
+    auto const range = hold::heldRange(1000 + 14, 0, 1000, up50);
+    CHECK(range.first == 1001);
+    CHECK(range.last == 1014);
+    // 23.98: ten grain periods (417 ms) is the threshold.
+    CHECK(hold::catchUpGrains(10.0 * 1001 / 24000, 24000, 1001) >= 10 + hold::kCatchUpMargin);
+    // A gap far beyond it still jumps.
+    CHECK(hold::heldRange(1000 + 500, 0, 1000, up50).first == 1500);
 }

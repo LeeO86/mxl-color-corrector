@@ -6,6 +6,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -42,6 +43,24 @@ int main(int argc, char** argv)
     {
         std::cerr << "{\"ok\":false,\"error\":\"reader\"}\n";
         return 1;
+    }
+    // --count-invalid N: how many of the last N grains carry MXL_GRAIN_FLAG_INVALID.
+    if (auto const countInvalid = std::atoi(arg(argc, argv, "--count-invalid", "0").c_str()); countInvalid > 0)
+    {
+        mxlFlowRuntimeInfo runtime{};
+        if (mxlFlowReaderGetRuntimeInfo(reader, &runtime) != MXL_STATUS_OK || runtime.headIndex == MXL_UNDEFINED_INDEX) return 1;
+        int invalid = 0;
+        int checked = 0;
+        for (auto i = runtime.headIndex - static_cast<std::uint64_t>(countInvalid - 1); i <= runtime.headIndex; ++i)
+        {
+            mxlGrainInfo grain{};
+            std::uint8_t* data = nullptr;
+            if (mxlFlowReaderGetGrainNonBlocking(reader, i, &grain, &data) != MXL_STATUS_OK) continue;
+            ++checked;
+            if ((grain.flags & MXL_GRAIN_FLAG_INVALID) != 0) ++invalid;
+        }
+        std::cout << "{\"ok\":true,\"head\":" << runtime.headIndex << ",\"checked\":" << checked << ",\"invalid\":" << invalid << "}\n";
+        return 0;
     }
     mxlGrainInfo info{};
     std::uint8_t* payload = nullptr;

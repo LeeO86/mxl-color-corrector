@@ -366,22 +366,15 @@ struct Engine::Impl
             }
             mxlReleaseFlowReader(output, own);
         };
+        // A writer that pauses up to this long and then catches up in sequence loses nothing;
+        // a longer silence is held (a killed writer). A restart takes 1–2 s, so it is still bridged.
+        auto stallSeconds = [&] { return std::max(0.25, 10.0 * current.rateDen / std::max(current.rateNum, 1)); };
+        auto catchUp = [&] { return hold::catchUpGrains(stallSeconds(), current.rateNum, current.rateDen); };
         // 3 holding, 4 no_signal (black after CC_HOLD_MAX_S), 0 waiting.
         auto holdState = [&] { return holding ? (holdBlack ? 4 : 3) : 0; };
-        // Repeats the held grain in the output's own timing, up to now.
-        auto emitHeld = [&] {
-            if (!holding || phaseWait || writer == nullptr || heldFrame.empty() || lastOut == MXL_UNDEFINED_INDEX || outOpen) return;
-            if (!holdBlack && hold::expired(monoNow(), lostAt, config.holdMaxS))
-            {
-                heldFrame = hold::blackV210(current.width, current.height, heldFrame.size());
-                heldFlags = MXL_GRAIN_FLAG_INVALID;
-                holdBlack = true;
-                logWarn("mxl_hold_expired channel=" + ch + " source=" + routeKey + " after_s=" + std::to_string(config.holdMaxS) +
-                        ", output black grains flagged invalid (no_signal)");
-            }
-            mxlRational rate{current.rateNum, current.rateDen};
-            auto const range = hold::heldRange(mxlGetCurrentIndex(&rate), outPhase, lastOut);
-            for (auto next = range.first; next <= range.last; ++next)
+        // Writes the held grain at [first, last].
+        auto writeHeld = [&](std::uint64_t first, std::uint64_t last) {
+            for (auto next = first; next <= last; ++next)
             {
                 mxlGrainInfo info{};
                 std::uint8_t* payload = nullptr;
@@ -394,6 +387,22 @@ struct Engine::Impl
                 lastOut = next;
                 ++heldGrains;
             }
+        };
+        // Repeats the held grain in the output's own timing, up to now.
+        auto emitHeld = [&] {
+            if (!holding || writer == nullptr || heldFrame.empty() || lastOut == MXL_UNDEFINED_INDEX || outOpen) return;
+            if (!holdBlack && hold::expired(monoNow(), lostAt, config.holdMaxS))
+            {
+                heldFrame = hold::blackV210(current.width, current.height, heldFrame.size());
+                heldFlags = MXL_GRAIN_FLAG_INVALID;
+                holdBlack = true;
+                logWarn("mxl_hold_expired channel=" + ch + " source=" + routeKey + " after_s=" + std::to_string(config.holdMaxS) +
+                        ", output black grains flagged invalid (no_signal)");
+            }
+            if (phaseWait) return;
+            mxlRational rate{current.rateNum, current.rateDen};
+            auto const range = hold::heldRange(mxlGetCurrentIndex(&rate), outPhase, lastOut, catchUp());
+            writeHeld(range.first, range.last);
         };
         // An output grain could not be opened or committed. Not the reader's fault: keep it, wait
         // a little and re-sync (which never goes at or below lastOut).
@@ -602,9 +611,7 @@ struct Engine::Impl
                 continue;
             }
             auto const head = info.runtime.headIndex;
-            // A writer that pauses up to this long and then catches up in sequence loses nothing;
-            // a longer silence is held (a killed writer). A restart takes 1–2 s, so it is still bridged.
-            double const stallAfter = std::max(0.25, 10.0 * current.rateDen / std::max(current.rateNum, 1));
+            double const stallAfter = stallSeconds();
             {
                 // A writer that went away leaves the old flow's head standing; a read is then never
                 // past the head, so MXL's own check never runs. Check while the head stands.
@@ -708,20 +715,48 @@ struct Engine::Impl
                     std::this_thread::sleep_for(std::chrono::milliseconds(5));
                     continue;
                 }
-                auto const resume = hold::resumeAt(head, config.wholeGrainOffset, decision.slice, lastOut, holding);
-                if (resume.wait)
+                auto const resume = hold::resumeAt(head, config.wholeGrainOffset, decision.slice, lastOut, catchUp());
+                bool const writing = monoNow() - writeSeenAt < stallAfter;
+                if (resume.action == hold::Action::Rephase && writing)
                 {
-                    // The source is back but runs later than the held grains: wait for it without
-                    // holding further, so it catches up; keep holding a source that does not write.
-                    phaseWait = monoNow() - writeSeenAt < stallAfter;
+                    // The source runs far behind the output (a writer indexing by UTC is 37 s behind
+                    // TAI) and would never catch up; the output cannot go back. Make the output flow
+                    // again in the source's timing; readers re-open a re-created flow.
+                    logWarn("mxl_output_recreated channel=" + ch + " source=" + key + " lag_grains=" + std::to_string(resume.lag) +
+                            ", the source runs behind the output; output flow made again in its timing");
+                    closeReader();
+                    closeWriter();
+                    phaseWait = false;
+                    phaseWaitLogged = false;
+                    continue;
+                }
+                if (resume.action != hold::Action::Read)
+                {
+                    // A source a little behind the held grains is waited for without holding further,
+                    // so it catches up; a source that does not write is held on.
+                    phaseWait = writing && resume.wait();
                     if (phaseWait && !phaseWaitLogged)
                     {
-                        logInfo("mxl_flow_resume_waiting channel=" + ch + " source=" + key + " head=" + std::to_string(head) + " last_out=" + std::to_string(lastOut));
+                        logInfo("mxl_flow_resume_waiting channel=" + ch + " source=" + key + " head=" + std::to_string(head) + " last_out=" + std::to_string(lastOut) +
+                                " lag_grains=" + std::to_string(resume.lag));
                         phaseWaitLogged = true;
                     }
+                    if (!holding && !phaseWait)
+                    {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                        continue;
+                    }
                     emitHeld();
+                    int const waitState = holdState();
+                    runtime.setState(channel, waitState == 0 ? (decision.slice ? 1 : 2) : waitState, decision.slice ? 1 : 0, static_cast<int>(decision.reason));
                     std::this_thread::sleep_for(std::chrono::milliseconds(2));
                     continue;
+                }
+                // A source a grain or two past the held ones: fill the gap with the held picture
+                // rather than leave grains MXL marks invalid.
+                if (holding && !heldFrame.empty() && lastOut != MXL_UNDEFINED_INDEX && resume.index > lastOut + 1 && resume.index - lastOut - 1 <= catchUp())
+                {
+                    writeHeld(lastOut + 1, resume.index - 1);
                 }
                 index = resume.index;
                 phaseWait = false;
@@ -733,9 +768,9 @@ struct Engine::Impl
                             " held_grains=" + std::to_string(heldGrains));
                     resumePending = false;
                 }
+                // The held picture stays until the first real grain, for holes right after the resume.
                 holding = false;
                 holdBlack = false;
-                heldFrame.clear();
             }
             if (!decision.slice && head < index + static_cast<std::uint64_t>(std::max(config.wholeGrainOffset, 0)))
             {
@@ -792,6 +827,7 @@ struct Engine::Impl
                 if (done)
                 {
                     lastOut = index;
+                    if (!holding && !heldFrame.empty()) heldFrame.clear();
                     writeFailures = 0;
                     mxlRational rate{current.rateNum, current.rateDen};
                     outPhase = hold::phaseOf(index, mxlGetCurrentIndex(&rate));
@@ -827,6 +863,8 @@ struct Engine::Impl
                 }
                 produced = 0;
                 grainCpu = 0;
+                // Right after a hold, repeat the held picture there rather than leave a grain MXL marks invalid.
+                if (!heldFrame.empty() && (lastOut == MXL_UNDEFINED_INDEX || index > lastOut)) writeHeld(index, index);
                 ++index;
             };
 

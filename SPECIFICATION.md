@@ -213,7 +213,10 @@ reader still holds the old file; its head stands, and a read past it returns
 - **Hold** (state `holding`: source gone or stalled). The channel repeats its last output grain
   at the grain rate, in the output's own timing: the held grains keep the distance to the
   grain clock that the output had at its last grain (`hold.hpp`), also for a source that
-  indexes behind the clock (a gateway indexing by capture time) or ahead of it.
+  indexes behind the clock (a gateway indexing by capture time) or ahead of it. When the hold
+  starts it fills in the time since the last output grain (up to the stall threshold plus 8
+  grains), so no grain is skipped and none is flagged invalid before the limit. The same applies
+  right after the resume: a hole there is filled with the held picture.
 - **Limit.** After `CC_HOLD_MAX_S` (default 10 s; 0 holds forever) the held picture turns
   black (Y 64, Cb and Cr 512) and the grains carry `MXL_GRAIN_FLAG_INVALID`
   (state `no_signal`, log `mxl_hold_expired`). The output flow keeps its grain rate. MXL
@@ -223,10 +226,15 @@ reader still holds the old file; its head stands, and a read past it returns
 - **Resume.** Output grain indices only ever go up: MXL refuses a grain at or below the last
   one committed (`PosixDiscreteFlowWriter::openGrain` → `MXL_ERR_INVALID_ARG`). The output
   resumes at the source's head (less the whole-grain offset) or right after the held grains,
-  whichever is later. A source that comes back running later than the held grains (a new
-  writer with more delay than the old one) is waited for without holding further
-  (`mxl_flow_resume_waiting`). The output then pauses for that difference instead of going
-  back. Grains of a late writer that the held ones already cover are skipped. A grain
+  whichever is later. A source that comes back running a little later than the held grains (a
+  new writer with more delay than the old one, up to the catch-up bound: the stall threshold
+  plus 8 grains, 21 at 50p) is waited for without holding further (`mxl_flow_resume_waiting`
+  with `lag_grains`). The output then pauses for that difference instead of going back. The
+  hold limit still counts during the wait. A source further behind (a writer indexing by UTC
+  is 37 s behind TAI) would never catch up while the output keeps its timing. The output flow
+  is then made again in the source's timing (`mxl_output_recreated` with `lag_grains`, same
+  flow id), and readers re-open it as a re-created flow. Grains of a late writer that the held
+  ones already cover are skipped. A grain
   that is still too early while the head is past it (left unfinished, or never written: a
   re-created flow starts at its own head, and whole-grain mode reads one grain behind it)
   is skipped instead of waited for. An output grain that cannot be written does not close
@@ -243,7 +251,8 @@ reader still holds the old file; its head stands, and a read past it returns
   - `mxl_reader_error` (`reason=read_error`);
   - `mxl_flow_reopen_failed` (the first failed attempt of an event);
   - `mxl_flow_reopened` (`attempts`, `after_ms`);
-  - `mxl_flow_resume_waiting`;
+  - `mxl_flow_resume_waiting` (`lag_grains`);
+  - `mxl_output_recreated` (`lag_grains`);
   - `mxl_flow_resumed` (`after_ms`, `held_grains`);
   - `mxl_hold_expired`;
   - metric `flow_reopens_total`.
