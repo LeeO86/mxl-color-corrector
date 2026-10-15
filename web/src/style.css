@@ -150,11 +150,12 @@ button.btn.danger { background: var(--bad); color: #fff; }
 .seg.fullwidth button { flex: 1; }
 .panel h3 .seg { text-transform: none; letter-spacing: 0; }
 
-/* Channel state: running, whole grain, holding, waiting; bypass */
+/* Channel state: running, whole grain, holding, no signal, waiting; bypass */
 .state-tag { display: inline-block; padding: .05rem .4rem; border-radius: 3px; font-size: .68rem; letter-spacing: .05em; font-weight: 700; text-transform: uppercase; white-space: nowrap; }
 .state-tag.running { background: var(--ok); color: #08240f; }
 .state-tag.whole_grain { background: var(--warn); color: #20180a; }
 .state-tag.holding { background: var(--warn); color: #20180a; }
+.state-tag.no_signal { background: var(--bad); color: #fff; }
 .state-tag.waiting { background: #5d6b7a; color: #fff; }
 .state-tag.bypass { background: var(--warn); color: #20180a; }
 .seg button .state-tag { margin-left: .45rem; font-size: .6rem; padding: 0 .3rem; }

@@ -147,7 +147,8 @@ std::vector<std::pair<std::string, std::string>> settingValues(Config const& cfg
         tags[name] = std::move(list);
     }
     return {{"CC_CHANNELS", std::to_string(cfg.channels)}, {"CC_CLIP", clipModeName(cfg.clip)}, {"CC_RGB_CLIP", cfg.rgbClip ? "on" : "off"},
-        {"CC_READ_OFFSET_GRAINS", std::to_string(cfg.wholeGrainOffset)}, {"CC_PREVIEW_FPS", std::to_string(cfg.previewFps)}, {"CC_SIMD", cfg.simd},
+        {"CC_READ_OFFSET_GRAINS", std::to_string(cfg.wholeGrainOffset)}, {"CC_PREVIEW_FPS", std::to_string(cfg.previewFps)},
+        {"CC_HOLD_MAX_S", std::to_string(cfg.holdMaxS)}, {"CC_SIMD", cfg.simd},
         {"CC_LOG_LEVEL", cfg.logLevel}, {"CC_CONFIG_FILE", cfg.configFile}, {"CC_STATE_DIR", cfg.stateDir}, {"MXL_DOMAIN_SCAN_PATH", cfg.scanPath},
         {"MXL_OUTPUT_DOMAIN_DIR", cfg.outputDomainDir}, {"MXL_OUTPUT_DOMAIN_ID", cfg.outputDomainId},
         {"MXL_HISTORY_DURATION_NS", std::to_string(cfg.historyDurationNs)}, {"MXL_CLEANUP_ON_EXIT", flag(cfg.cleanupOnExit)},
@@ -252,6 +253,11 @@ Config loadConfig(std::map<std::string, std::string> const& env, std::map<std::s
     if (!ok || cfg.previewFps < 1 || cfg.previewFps > 30)
     {
         throw ConfigError("CC_PREVIEW_FPS must be from 1 to 30");
+    }
+    cfg.holdMaxS = parseInt(lookup(env, file, "CC_HOLD_MAX_S", "10"), ok);
+    if (!ok || cfg.holdMaxS < 0 || cfg.holdMaxS > 86400)
+    {
+        throw ConfigError("CC_HOLD_MAX_S must be an integer from 0 (hold forever) to 86400");
     }
     cfg.simd = lookup(env, file, "CC_SIMD", "auto");
     if (!validSimdRequest(cfg.simd))

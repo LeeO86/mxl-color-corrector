@@ -60,6 +60,8 @@ int main(int argc, char** argv)
     int seconds = argInt(argc, argv, "--seconds", 8);
     // 1: write each grain at its time (a real-time source); 0: as fast as the slice sleeps allow.
     bool const paced = argInt(argc, argv, "--paced", 0) != 0;
+    // Index grains this many grains behind the clock, as a gateway indexing by capture time does.
+    int const lagGrains = argInt(argc, argv, "--lag-grains", 0);
     auto interlace = arg(argc, argv, "--interlace", "progressive");
     if (width % 2 || width < 2 || height < 1 || sliceLines < 1) return 2;
 
@@ -119,12 +121,13 @@ int main(int argc, char** argv)
         cc::packV210Line(frame.data() + static_cast<std::size_t>(row * stride), width, stride, y.data(), cb.data(), cr.data());
     }
     mxlRational edit{rate, 1};
-    auto index = mxlGetCurrentIndex(&edit);
+    auto index = mxlGetCurrentIndex(&edit) - static_cast<std::uint64_t>(std::max(lagGrains, 0));
     auto const until = std::chrono::steady_clock::now() + std::chrono::seconds(seconds);
     std::cerr << "{\"flow\":\"" << flowId << "\",\"domain\":\"" << domainId << "\",\"index\":" << index << "}\n";
     while (std::chrono::steady_clock::now() < until)
     {
-        while (paced && mxlGetCurrentIndex(&edit) < index && std::chrono::steady_clock::now() < until) ::usleep(1000);
+        while (paced && mxlGetCurrentIndex(&edit) < index + static_cast<std::uint64_t>(std::max(lagGrains, 0)) && std::chrono::steady_clock::now() < until)
+            ::usleep(1000);
         mxlGrainInfo info{};
         std::uint8_t* payload = nullptr;
         if (mxlFlowWriterOpenGrain(writer, index, &info, &payload) != MXL_STATUS_OK || payload == nullptr) break;

@@ -23,6 +23,7 @@ const DESCRIPTIONS = {
   CC_RGB_CLIP: "Default RGB gamut clip of a new channel.",
   CC_READ_OFFSET_GRAINS: "Whole-grain read offset. Slice mode always follows the writer.",
   CC_PREVIEW_FPS: "Thumbnail rate, 1–30.",
+  CC_HOLD_MAX_S: "Seconds a channel holds its last picture while the source is gone or stalled; then black, flagged invalid (no_signal). 0 holds forever.",
   CC_LOG_LEVEL: "error, warn, info.",
   CC_CONFIG_FILE: "JSON object of these keys (environment only).",
   CC_STATE_DIR: "Writable state: state.json (controls, presets) and routes.json.",

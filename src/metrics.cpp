@@ -18,6 +18,7 @@ char const* stateName(int state)
     if (state == 1) return "running";
     if (state == 2) return "whole_grain";
     if (state == 3) return "holding";
+    if (state == 4) return "no_signal";
     return "waiting";
 }
 } // namespace
@@ -205,13 +206,13 @@ std::string RuntimeBoard::render(double processCpuSeconds) const
     out += "# HELP mxl_color_corrector_flow_reopens_total Source flows re-opened after they were deleted or re-created under the same id\n"
            "# TYPE mxl_color_corrector_flow_reopens_total counter\n";
     out += "# HELP mxl_color_corrector_process_cpu_seconds_total Process CPU time\n# TYPE mxl_color_corrector_process_cpu_seconds_total counter\n";
-    char const* states[] = {"waiting", "running", "whole_grain", "holding"};
+    char const* states[] = {"waiting", "running", "whole_grain", "holding", "no_signal"};
     char const* reasons[] = {"none", "interlaced", "no_slice_commits", "slice_layout"};
     for (std::size_t i = 0; i < channels_.size(); ++i)
     {
         auto const& row = channels_[i];
         auto const ch = std::to_string(i + 1);
-        for (int s = 0; s < 4; ++s)
+        for (int s = 0; s < 5; ++s)
         {
             out += "mxl_color_corrector_channel_state{channel=\"" + ch + "\",state=\"" + states[s] + "\"} " +
                    std::to_string(row.state == s ? 1 : 0) + "\n";

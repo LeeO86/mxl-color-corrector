@@ -43,6 +43,9 @@ struct Config
     std::string logLevel = "info";
     std::string configFile;
     int previewFps = 4;
+    // CC_HOLD_MAX_S: how long a channel holds its last picture while the source is gone or
+    // stalled; then black grains flagged invalid (state no_signal). 0 holds forever.
+    int holdMaxS = 10;
     // CC_SIMD: auto, avx512, avx512vl, avx2 or scalar (color/simd.hpp).
     std::string simd = "auto";
     int shutdownTimeoutS = 10;

@@ -42,6 +42,16 @@ TEST_CASE("env wins over the file and unknown file keys fail")
     CHECK_THROWS_AS(loadConfig({{"MXL_OUTPUT_DOMAIN_ID", "not-a-uuid"}}, {}), ConfigError);
 }
 
+TEST_CASE("CC_HOLD_MAX_S defaults to 10 s, 0 holds forever")
+{
+    CHECK(loadConfig({}, {}).holdMaxS == 10);
+    CHECK(loadConfig({{"CC_HOLD_MAX_S", "0"}}, {}).holdMaxS == 0);
+    CHECK(loadConfig({}, {{"CC_HOLD_MAX_S", "30"}}).holdMaxS == 30);
+    CHECK_THROWS_AS(loadConfig({{"CC_HOLD_MAX_S", "-1"}}, {}), ConfigError);
+    CHECK_THROWS_AS(loadConfig({{"CC_HOLD_MAX_S", "ten"}}, {}), ConfigError);
+    CHECK(knownSetting("CC_HOLD_MAX_S"));
+}
+
 TEST_CASE("CC_SIMD defaults to auto and takes the five levels")
 {
     CHECK(loadConfig({}, {}).simd == "auto");

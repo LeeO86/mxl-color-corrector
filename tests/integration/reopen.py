@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """Re-create the source flow under the same id and check that the channel re-opens it.
 
-A paced pattern writer feeds channel 1. It stops (MXL deletes the flow with its last writer) and
-starts again: once at once and once after a 1 s gap. Each time the channel must read the new
-flow again within 1 s, without an IS-05 activation, count one re-open, and keep its output flow
-going meanwhile (state holding, the output head advancing). Then the writer is killed, which
-leaves its flow behind: the channel holds its output until the writer is back. Twice: with slice commits (slice
-mode) and with whole grains (whole-grain mode, which reads one grain behind the head and so
-starts before the new flow's first grain).
+A paced pattern writer feeds channel 1.
+1. It stops (MXL deletes the flow with its last writer) and starts again at once.
+2. It stops and starts again after a 1 s gap: the output holds its last grain (state holding).
+3. It is killed and leaves its flow behind: no write, the flow stays valid; the output holds.
+4. It stops for longer than CC_HOLD_MAX_S (2 s here): the output turns black, flagged invalid
+   (state no_signal), and resumes when the writer is back.
+Each time the channel must read the new flow within 1 s without an IS-05 activation, and the
+output head must keep going and never go back. Four passes: slice and whole-grain mode, each
+with a writer on the clock and one 12 grains behind it (a gateway indexing by capture time).
 """
 
 import json
@@ -24,6 +26,7 @@ BUILD = os.environ.get("CC_BUILD", os.path.join(ROOT, "build"))
 ROOT_TMP = os.environ.get("CC_TMP", "/tmp/mxl-cc-reopen-it")
 BASE = ROOT_TMP
 SLICE_LINES = "36"
+LAG = 0
 DOMAIN = "77777777-7777-4777-8777-777777777777"
 FLOW = "88888888-8888-4888-8888-888888888888"
 WEB = int(os.environ.get("CC_WEB_PORT", "18144"))
@@ -47,6 +50,12 @@ def metric(name):
     return float(m.group(1)) if m else None
 
 
+def metric_plain(name):
+    _, text = http("GET", "/metrics")
+    m = re.search(r"^mxl_color_corrector_" + name + r" (\S+)$", text, re.M)
+    return float(m.group(1)) if m else 0.0
+
+
 def channel():
     return json.loads(http("GET", "/api/v1/status")[1])["channels"][0]
 
@@ -64,12 +73,13 @@ def writer(seconds):
             "--slices", SLICE_LINES,
             "--sleep-us", "200",
             "--paced", "1",
+            "--lag-grains", str(LAG),
             "--seconds", str(seconds),
         ]
     )
 
 
-def output_head(flow):
+def output_grain(flow):
     proc = subprocess.run(
         [os.path.join(BUILD, "mxl-cc-sample"), "--domain", os.path.join(BASE, "cc-out"), "--flow", flow, "--points", "0,0", "--timeout-ms", "100"],
         check=False,
@@ -78,7 +88,18 @@ def output_head(flow):
     )
     if proc.returncode != 0:
         return None
-    return json.loads(proc.stdout)["index"]
+    return json.loads(proc.stdout)
+
+
+heads = []
+
+
+def output_head(flow):
+    doc = output_grain(flow)
+    if doc is None:
+        return None
+    heads.append(doc["index"])
+    return doc["index"]
 
 
 def wait_until(what, pred, seconds):
@@ -91,10 +112,12 @@ def wait_until(what, pred, seconds):
 
 
 def main():
-    global BASE, SLICE_LINES
-    for mode, lines in (("running", "36"), ("whole_grain", "360")):
-        BASE = os.path.join(ROOT_TMP, mode)
+    global BASE, SLICE_LINES, LAG
+    for mode, lines, lag in (("running", "36", 0), ("whole_grain", "360", 0), ("running", "36", 12), ("whole_grain", "360", 12)):
+        BASE = os.path.join(ROOT_TMP, f"{mode}-lag{lag}")
         SLICE_LINES = lines
+        LAG = lag
+        heads.clear()
         run(mode)
 
 
@@ -115,6 +138,7 @@ def run(mode):
             "CC_PREVIEW_FPS": "1",
             "NMOS_DNS_SD": "false",
             "CC_LOG_LEVEL": "info",
+            "CC_HOLD_MAX_S": "2",
         }
     )
     first = writer(4)
@@ -144,8 +168,14 @@ def run(mode):
         second = writer(4)
         procs.append(second)
         base = metric("grains_processed_total")
+        cpu0, t0 = metric_plain("process_cpu_seconds_total"), time.monotonic()
         results["immediate"] = wait_until("grains from the re-created flow", lambda: metric("grains_processed_total") > base + 2, RESUME_S + 1)
         wait_until("one re-open", lambda: metric("flow_reopens_total") == 1, 2)
+        time.sleep(1.0)
+        cpu = (metric_plain("process_cpu_seconds_total") - cpu0) / (time.monotonic() - t0)
+        if cpu > 0.6:
+            raise SystemExit(f"{cpu:.2f} cores after the re-create: a busy loop?")
+        results["cores_after_recreate"] = cpu
 
         # 2: stop, 1 s without the flow, start again. The output holds its last grain.
         second.wait(timeout=10)
@@ -188,17 +218,46 @@ def run(mode):
         if k2 is None or k2 <= k1:
             raise SystemExit(f"output did not continue after the kill: {k1} -> {k2}")
         results["reopens_after_kill"] = metric("flow_reopens_total") - reopens
+
+        # 4: gone for longer than CC_HOLD_MAX_S: black, flagged invalid, state no_signal.
+        reopens = metric("flow_reopens_total")
+        fourth.wait(timeout=10)
+        wait_until("holding", lambda: channel()["state"] == "holding", 1)
+        results["no_signal_after"] = wait_until("no_signal", lambda: channel()["state"] == "no_signal", 3.5)
+        grain = output_grain(out_flow)
+        if grain is None or not grain["flags"] & 1 or grain["points"][0]["y_code"] != 64 or grain["points"][0]["cb"] != 512:
+            raise SystemExit(f"expected a black grain flagged invalid after the limit: {grain}")
+        n0 = output_head(out_flow)
+        time.sleep(0.3)
+        n1 = output_head(out_flow)
+        if n0 is None or n1 is None or n1 < n0 + 8:
+            raise SystemExit(f"output stopped after the limit: {n0} -> {n1}")
+        fifth = writer(3)
+        procs.append(fifth)
+        base = metric("grains_processed_total")
+        results["after_limit"] = wait_until("grains after the limit", lambda: metric("grains_processed_total") > base + 2, RESUME_S + 1)
+        wait_until(mode, lambda: channel()["state"] == mode, 1)
+        if metric("flow_reopens_total") != reopens + 1:
+            raise SystemExit("expected one re-open after the limit")
+        grain = output_grain(out_flow)
+        if grain is None or grain["flags"] & 1:
+            raise SystemExit(f"output still flagged invalid after the source came back: {grain}")
+        output_head(out_flow)
+        if any(b < a for a, b in zip(heads, heads[1:])):
+            raise SystemExit(f"the output head went back: {heads}")
         log.flush()
         text = open(log_path).read()
-        for event in ("mxl_flow_recreated", "mxl_flow_reopened", "mxl_flow_resumed"):
-            if text.count(event) < 2:
-                raise SystemExit(f"expected two {event} logs\n{text}")
+        for event in ("mxl_flow_recreated", "mxl_flow_reopened", "mxl_flow_resumed", "mxl_source_stalled", "mxl_hold_expired"):
+            if event not in text:
+                raise SystemExit(f"expected a {event} log\n{text}")
+        if "output grain write failed" in text:
+            raise SystemExit(f"an output grain was refused\n{text}")
         for name, seconds in results.items():
-            if name.startswith("reopens"):
+            if not name.startswith(("immediate", "after")):
                 continue
             if seconds > RESUME_S:
                 raise SystemExit(f"{name}: grains came back after {seconds:.2f} s, more than {RESUME_S} s")
-        print("reopen ok", mode, {k: round(v, 3) for k, v in results.items()}, "held output", h0, "->", h1)
+        print("reopen ok", mode, f"lag {LAG}", {k: round(v, 3) for k, v in results.items()}, "held output", h0, "->", h1)
         print("\n".join(line for line in text.splitlines() if "mxl_flow" in line))
     finally:
         for proc in procs:

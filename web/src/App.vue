@@ -33,6 +33,7 @@ const running = computed(() => count((c) => c.state === "running" || c.state ===
 const wholeGrain = computed(() => count((c) => c.state === "whole_grain"));
 const waiting = computed(() => count((c) => c.state === "waiting"));
 const holding = computed(() => count((c) => c.state === "holding"));
+const noSignal = computed(() => count((c) => c.state === "no_signal"));
 const bypassed = computed(() => count((c) => c.bypass));
 const registration = computed(() => {
   const n = live.status?.nmos;
@@ -59,7 +60,8 @@ onUnmounted(() => {
     <span class="spacer"></span>
     <Pill v-if="channels.length" :text="`${running} of ${channels.length} running`" :kind="running ? 'ok' : 'neutral'" title="channels correcting a picture (slice by slice or whole grains)" />
     <Pill v-if="wholeGrain" :text="`${wholeGrain} whole grain`" kind="warn" title="no slice commits, interlaced or an odd slice layout: up to one grain of delay" />
-    <Pill v-if="holding" :text="`${holding} holding`" kind="warn" title="the source flow was deleted or re-created; re-opening it, the output repeats its last picture" />
+    <Pill v-if="holding" :text="`${holding} holding`" kind="warn" title="source gone or stalled: the output repeats its last picture (up to CC_HOLD_MAX_S)" />
+    <Pill v-if="noSignal" :text="`${noSignal} no signal`" kind="bad" title="source gone or stalled for longer than CC_HOLD_MAX_S: the output is black, flagged invalid" />
     <Pill v-if="waiting" :text="`${waiting} waiting`" kind="neutral" title="not routed, or the domain or flow is not there (yet)" />
     <Pill v-if="bypassed" :text="`${bypassed} bypassed`" kind="warn" title="channels passing their input through" />
     <Pill v-if="registration" :text="registration.text" :kind="registration.kind" title="NMOS registration" />

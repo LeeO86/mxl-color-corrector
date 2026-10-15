@@ -26,6 +26,7 @@ Environment overrides `CC_CONFIG_FILE`, which overrides the defaults. Unknown en
 | `CC_RGB_CLIP` | `off` | RGB gamut clip |
 | `CC_READ_OFFSET_GRAINS` | `1` | Whole-grain read offset. Slice mode always follows the writer |
 | `CC_PREVIEW_FPS` | `4` | Thumbnail rate, 1–30 |
+| `CC_HOLD_MAX_S` | `10` | Seconds a channel holds its last picture while its source is gone or stalled; then black grains flagged invalid (state `no_signal`). `0` holds forever ([Source gone, stalled or re-created](#source-gone-stalled-or-re-created)) |
 | `CC_SIMD` | `auto` | CPU code for the colour processing: `auto`, `avx512`, `avx512vl`, `avx2` or `scalar` ([CPU code](#cpu-code-cc_simd)) |
 | `CC_LOG_LEVEL` | `info` | `error`, `warn`, `info` |
 | `CC_CONFIG_FILE` | unset | JSON object of the keys in this table |
@@ -91,9 +92,32 @@ Import restores channels, presets and IS-05 routes. The `settings` object in an 
 
 The image is `ghcr.io/leeo86/mxl-color-corrector:1.2.1`, uid 1000, pod network, MXL root hostPath `/Volumes/mxl`, writable `/config`. `deploy/k8s/deployment.yaml` sets `NMOS_HOST_ADDRESS` from `status.podIP`, `MXL_CLEANUP_ON_EXIT=true`, and `terminationGracePeriodSeconds: 20`. `production-down` should SIGTERM and then see the node and this instance's domain disappear.
 
-## Re-created source flows
+## Source gone, stalled or re-created
 
-A writer that restarts re-creates its flow under the same id (a new data file). A channel re-opens it by itself, without an IS-05 activation: at once on `MXL_ERR_FLOW_INVALID` or when the head has stood for two grain periods and the flow's file is gone or replaced, then after 100, 200 and 500 ms and every second while it is missing, and at once when its file shows up (checked every 20 ms). Meanwhile the output flow repeats its last grain at the grain rate, so downstream functions see no gap; the channel's state is `holding`. A source that is no longer written but still there (a killed writer leaves its flow) is held the same way after four grain periods (at least 100 ms) without a write, until it is written again or replaced. Each channel reads on an MXL instance of its own, so a re-open always gets a new reader. Logs `mxl_source_stalled`, `mxl_flow_recreated`, `mxl_flow_reopen_failed`, `mxl_flow_reopened` (`attempts`, `after_ms`), `mxl_flow_resumed` (`after_ms`, `held_grains`); metric `mxl_color_corrector_flow_reopens_total{channel}`; `flow_reopens` in the status. Details in SPECIFICATION §5.3.
+A writer that restarts re-creates its flow under the same id, with a new data file. A channel re-opens it by itself, without an IS-05 activation:
+- at once on `MXL_ERR_FLOW_INVALID`, or when the head has stood for two grain periods and the flow's file is gone or replaced;
+- then after 100, 200 and 500 ms, and every second while it is missing;
+- and at once when its file shows up (checked every 20 ms).
+
+A source that is still there but no longer written (a killed writer leaves its flow) counts as stalled after ten grain periods (at least 250 ms) without a write. A writer that pauses for less and catches up loses nothing.
+
+While the source is gone or stalled, the output repeats its last grain at the grain rate, in its own timing, and the state is `holding`. After `CC_HOLD_MAX_S` (default 10 s; 0 holds forever) the picture turns black and the grains are flagged invalid. The state is then `no_signal`, so a multiviewer raises its no-signal alarm and replay stops recording.
+
+Output indices only go up. A source that comes back later than the held grains is waited for; the output then pauses for the difference.
+
+Each channel reads on an MXL instance of its own, so a re-open always gets a new reader.
+
+Logs:
+- `mxl_source_stalled`;
+- `mxl_flow_recreated` (`reason=flow_invalid|flow_replaced`);
+- `mxl_reader_error` (`reason=read_error`);
+- `mxl_flow_reopen_failed`;
+- `mxl_flow_reopened` (`attempts`, `after_ms`);
+- `mxl_flow_resume_waiting`;
+- `mxl_flow_resumed` (`after_ms`, `held_grains`);
+- `mxl_hold_expired`.
+
+The metric is `mxl_color_corrector_flow_reopens_total{channel}`, also `flow_reopens` in the status. Details are in SPECIFICATION §5.3.
 
 ## CPU code (`CC_SIMD`)
 

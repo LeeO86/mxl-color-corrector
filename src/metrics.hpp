@@ -42,7 +42,7 @@ private:
 
 struct ChannelStats
 {
-    int state = 0; // 0 waiting, 1 running, 2 whole-grain, 3 holding (source re-opening, output repeats its last grain)
+    int state = 0; // 0 waiting, 1 running, 2 whole-grain, 3 holding (source gone or stalled, output repeats its last grain), 4 no_signal (held past CC_HOLD_MAX_S: black, flagged invalid)
     int sliceMode = 0;
     int fallback = 0;
     int bypass = 0;

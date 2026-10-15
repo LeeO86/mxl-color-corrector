@@ -65,7 +65,8 @@ int main(int argc, char** argv)
         return 1;
     }
     int const stride = cc::v210Stride(width);
-    std::cout << "{\"ok\":true,\"index\":" << index << ",\"valid_slices\":" << info.validSlices << ",\"total_slices\":" << info.totalSlices << ",\"points\":[";
+    std::cout << "{\"ok\":true,\"index\":" << index << ",\"valid_slices\":" << info.validSlices << ",\"total_slices\":" << info.totalSlices << ",\"flags\":" << info.flags
+              << ",\"points\":[";
     bool first = true;
     std::stringstream ss(points);
     std::string item;

@@ -14,6 +14,7 @@ find_package(Threads REQUIRED)
 
 set(CC_CORE_SOURCES
     src/v210.cpp
+    src/hold.cpp
     src/color/controls.cpp
     src/color/process.cpp
     src/color/process_avx2.cpp
@@ -49,6 +50,7 @@ if(CC_BUILD_TESTS)
         tests/unit/test_color.cpp
         tests/unit/test_config.cpp
         tests/unit/test_api.cpp
+        tests/unit/test_hold.cpp
     )
     target_include_directories(unit-tests PRIVATE src third_party)
     target_link_libraries(unit-tests PRIVATE cc_core)
