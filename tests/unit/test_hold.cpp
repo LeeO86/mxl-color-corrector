@@ -24,9 +24,9 @@ TEST_CASE("held grains keep the output's phase, also for a source behind the clo
     // Nothing to write while the clock has not moved on.
     range = hold::heldRange(1000, phase, 988, kUp);
     CHECK(range.first > range.last);
-    // A long gap jumps to the target instead of writing every grain.
+    // A long gap writes only the newest kUp grains; MXL marks the older ones invalid.
     range = hold::heldRange(2000, phase, 988, kUp);
-    CHECK(range.first == 1988);
+    CHECK(range.first == 1981);
     CHECK(range.last == 1988);
     // A source ahead of the clock.
     CHECK(hold::heldRange(1000, 5, 1003, kUp).first == 1004);
@@ -142,8 +142,8 @@ TEST_CASE("the hold fills in the stall time without a jump, so no grain is marke
     CHECK(range.last == 1014);
     // 23.98: ten grain periods (417 ms) is the threshold.
     CHECK(hold::catchUpGrains(10.0 * 1001 / 24000, 24000, 1001) >= 10 + hold::kCatchUpMargin);
-    // A gap far beyond it still jumps.
-    CHECK(hold::heldRange(1000 + 500, 0, 1000, up50).first == 1500);
+    // A gap far beyond it writes only the newest grains.
+    CHECK(hold::heldRange(1000 + 500, 0, 1000, up50).first == 1500 - up50 + 1);
 }
 
 TEST_CASE("a gap in the output is filled, never left for MXL to mark invalid")
@@ -157,13 +157,31 @@ TEST_CASE("a gap in the output is filled, never left for MXL to mark invalid")
     CHECK(range.first > range.last);
     range = hold::fillRange(hold::kUndefined, 1001, 50);
     CHECK(range.first > range.last);
-    // A gap longer than the ring: only the last `ring` grains, which cover every slot.
+    // A gap longer than the cap: only the newest `ring` grains.
     range = hold::fillRange(1000, 2000, 50);
     CHECK(range.first == 1950);
     CHECK(range.last == 1999);
     // The held output starting 22 grains after the last one (the cc thread was late): filled,
-    // not jumped, when the ring is larger than the catch-up.
+    // not jumped, within the cap.
     auto const held = hold::heldRange(1022 + 2, -2, 1000, 50);
     CHECK(held.first == 1001);
     CHECK(held.last == 1022);
+}
+
+TEST_CASE("a fill writes at most twice the catch-up and 256 MB")
+{
+    auto const up50 = hold::catchUpGrains(0.25, 50, 1); // 21
+    // 640x360 v210 (0.6 MB): twice the catch-up.
+    CHECK(hold::fillCap(up50, 640 * 360 * 8 / 3) == 2 * up50);
+    // 2160p v210 (about 22 MB): the byte budget.
+    std::size_t const uhd = static_cast<std::size_t>(10240) * 2160;
+    auto const capUhd = hold::fillCap(up50, uhd);
+    CHECK(capUhd == hold::kFillBudgetBytes / uhd);
+    CHECK(capUhd * uhd <= hold::kFillBudgetBytes);
+    CHECK(capUhd >= 10);
+    // A long history (MXL_HISTORY_DURATION_NS = 10 s, 500 grains) does not raise it.
+    auto const range = hold::fillRange(1000, 1500, capUhd);
+    CHECK(range.last == 1499);
+    CHECK(range.last - range.first + 1 == capUhd);
+    CHECK(hold::fillCap(up50, std::size_t{1} << 31) == 1);
 }

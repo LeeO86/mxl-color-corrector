@@ -385,13 +385,8 @@ struct Engine::Impl
         // a longer silence is held (a killed writer). A restart takes 1–2 s, so it is still bridged.
         auto stallSeconds = [&] { return std::max(0.25, 10.0 * current.rateDen / std::max(current.rateNum, 1)); };
         auto catchUp = [&] { return hold::catchUpGrains(stallSeconds(), current.rateNum, current.rateDen); };
-        // The output flow's ring in grains (its history), at least the catch-up: a gap up to this is
-        // filled with the held picture rather than left to MXL to mark invalid.
-        auto outRing = [&] {
-            double const rate = current.rateDen > 0 && current.rateNum > 0 ? static_cast<double>(current.rateNum) / current.rateDen : 50.0;
-            auto const grains = static_cast<std::uint64_t>(std::ceil(static_cast<double>(config.historyDurationNs) * 1e-9 * rate)) + 2;
-            return std::clamp<std::uint64_t>(grains, catchUp(), 500);
-        };
+        // How many grains one fill may write (hold::fillCap): about the catch-up, at most 256 MB.
+        auto fillCap = [&] { return hold::fillCap(catchUp(), heldFrame.size()); };
         // 3 holding, 4 no_signal (black after CC_HOLD_MAX_S), 0 waiting.
         auto holdState = [&] { return holding ? (holdBlack ? 4 : 3) : 0; };
         // Writes the held grain at [first, last].
@@ -423,7 +418,7 @@ struct Engine::Impl
             }
             if (phaseWait) return;
             mxlRational rate{current.rateNum, current.rateDen};
-            auto const range = hold::heldRange(mxlGetCurrentIndex(&rate), outPhase, lastOut, outRing());
+            auto const range = hold::heldRange(mxlGetCurrentIndex(&rate), outPhase, lastOut, fillCap());
             writeHeld(range.first, range.last);
         };
         // Before output grain `next`: fill a gap after the last output grain with that grain's picture
@@ -431,14 +426,17 @@ struct Engine::Impl
         // grains), so no output grain is left invalid.
         double gapLogDue = 0;
         auto fillGap = [&](std::uint64_t next) {
-            auto const range = hold::fillRange(lastOut, next, outRing());
-            if (range.first > range.last || writer == nullptr) return;
+            if (lastOut == MXL_UNDEFINED_INDEX || next <= lastOut + 1 || writer == nullptr) return;
             if (heldFrame.empty()) captureHeld();
             if (heldFrame.empty()) return;
+            auto const range = hold::fillRange(lastOut, next, fillCap());
+            auto const gap = next - lastOut - 1;
+            auto const t0 = monoNow();
             writeHeld(range.first, range.last);
             if (auto const now = monoNow(); now >= gapLogDue)
             {
-                logInfo("output_gap_filled channel=" + ch + " grains=" + std::to_string(range.last - range.first + 1) + " (repeated the last output grain)");
+                logInfo("output_gap_filled channel=" + ch + " gap=" + std::to_string(gap) + " grains=" + std::to_string(range.last - range.first + 1) +
+                        " ms=" + std::to_string(static_cast<long>((now - t0) * 1000.0)) + " (repeated the last output grain)");
                 gapLogDue = now + 5.0;
             }
         };
