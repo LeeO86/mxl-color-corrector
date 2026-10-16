@@ -277,6 +277,9 @@ MXL (`218ddaa`, `FlowParser.cpp`) stores a flow with `interlace_mode` `interlace
 has it), MXL doubles it to index fields, and each grain is one field of `frame_height / 2`
 lines (`height / 2` slices). MXL refuses any other interlace mode, `interlaced_psf` too.
 
+Interlaced video and its ANC follow the shared MXL interlaced convention:
+https://github.com/LeeO86/mxl-multiviewer/blob/main/docs/mxl-interlaced.md
+
 - **Field in, field out.** The correction is per pixel, so a channel corrects each field grain
   as `frame_height / 2` lines. Its output flow declares the input's `interlace_mode`,
   `grain_rate` and frame size, so MXL gives it the same field grains at the field rate; output
