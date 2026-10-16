@@ -42,7 +42,7 @@ private:
 
 struct ChannelStats
 {
-    int state = 0; // 0 waiting, 1 running, 2 whole-grain, 3 holding (source gone or stalled, output repeats its last grain), 4 no_signal (held past CC_HOLD_MAX_S: black, flagged invalid)
+    int state = 0; // 0 waiting, 1 running, 2 whole-grain, 3 holding (source gone or stalled, output repeats its last grain), 4 no_signal (held past CC_HOLD_MAX_S: black, flagged invalid), 5 unsupported (grains that do not match the flow's format, skipped)
     int sliceMode = 0;
     int fallback = 0;
     int bypass = 0;
@@ -50,6 +50,7 @@ struct ChannelStats
     std::uint64_t late = 0;
     std::uint64_t settingsChanges = 0;
     std::uint64_t flowReopens = 0;
+    std::uint64_t unsupportedGrains = 0;
     double clippedRatio = 0;
     std::string sourceLabel;
     std::string domainId;
@@ -80,6 +81,7 @@ public:
     void addLate(int channel, std::uint64_t count);
     void addSettingsChange(int channel);
     void addFlowReopen(int channel);
+    void addUnsupported(int channel);
     void setPreview(int channel, std::vector<std::uint8_t> input, std::vector<std::uint8_t> output);
 
     [[nodiscard]] ChannelStats snapshot(int channel) const;

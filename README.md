@@ -90,7 +90,7 @@ Import restores channels, presets and IS-05 routes. The `settings` object in an 
 
 ## Platform
 
-The image is `ghcr.io/leeo86/mxl-color-corrector:1.2.2`, uid 1000, pod network, MXL root hostPath `/Volumes/mxl`, writable `/config`. `deploy/k8s/deployment.yaml` sets `NMOS_HOST_ADDRESS` from `status.podIP`, `MXL_CLEANUP_ON_EXIT=true`, and `terminationGracePeriodSeconds: 20`. `production-down` should SIGTERM and then see the node and this instance's domain disappear.
+The image is `ghcr.io/leeo86/mxl-color-corrector:1.2.3`, uid 1000, pod network, MXL root hostPath `/Volumes/mxl`, writable `/config`. `deploy/k8s/deployment.yaml` sets `NMOS_HOST_ADDRESS` from `status.podIP`, `MXL_CLEANUP_ON_EXIT=true`, and `terminationGracePeriodSeconds: 20`. `production-down` should SIGTERM and then see the node and this instance's domain disappear.
 
 ## Source gone, stalled or re-created
 
@@ -121,6 +121,14 @@ Logs:
 - `mxl_hold_expired`.
 
 The metric is `mxl_color_corrector_flow_reopens_total{channel}`, also `flow_reopens` in the status. Details are in SPECIFICATION §5.3.
+
+## Interlaced input
+
+MXL stores an interlaced flow (`interlaced_tff` or `interlaced_bff`) as fields: each grain is one field, half the frame's lines, at twice the declared `grain_rate`; 1080i50 declares 25/1 and runs 50 grains of 540 lines a second. A channel reads a field and writes a field: its output flow declares the input's `interlace_mode`, rate and frame height, so its grains are the same fields with the same indices, and the field order passes through. The hold, the gap fill and the stall threshold count fields. Interlaced input runs in whole-grain mode (`fallback_reason` `interlaced`), one field of delay.
+
+Each grain is checked against the flow's declared format (size, slice count) and the flow's grain rate against the declared one. A grain that does not match is skipped, never read or written past its end; the state is then `unsupported`, `mxl_color_corrector_unsupported_grains_total{channel}` (`unsupported_grains` in the status) counts it, and `unsupported_grain` is logged at most every 5 s. 1.2.2 and earlier read a 1080i field as 1080 lines and crashed (SIGSEGV).
+
+NMOS: the output flow has the input's `interlace_mode` and `grain_rate` the frame rate (IS-04). The receiver takes progressive at the usual rates, and tff or bff at 25/1 and 30000/1001 (the interlaced rates MXL allows).
 
 ## CPU code (`CC_SIMD`)
 

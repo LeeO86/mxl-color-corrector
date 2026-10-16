@@ -169,7 +169,7 @@ Both views set the same parameters, the three trims, and always show the same st
   a tested property (§10).
 - Added latency target: one slice plus processing time, not one frame.
 - **Fallback to whole-grain processing** (logged once per change and shown in
-  status and metrics) when: the input is interlaced, the input does not provide
+  status and metrics) when: the input is interlaced (§5.4), the input does not provide
   slice commits, or the frame height does not divide into the slice layout. Whole
   grain then adds up to one grain of latency.
 - Grain metadata (timestamps, flags such as invalid/gap) is carried over unchanged;
@@ -269,6 +269,34 @@ reader still holds the old file; its head stands, and a read past it returns
   - `mxl_hold_expired`;
   - metric `flow_reopens_total`.
 
+### 5.4 Interlaced input (1.2.3)
+
+MXL (`218ddaa`, `FlowParser.cpp`) stores a flow with `interlace_mode` `interlaced_tff` or
+`interlaced_bff` as fields: `grain_rate` must be 25/1 or 30000/1001 (the frame rate, as IS-04
+has it), MXL doubles it to index fields, and each grain is one field of `frame_height / 2`
+lines (`height / 2` slices). MXL refuses any other interlace mode, `interlaced_psf` too.
+
+- **Field in, field out.** The correction is per pixel, so a channel corrects each field grain
+  as `frame_height / 2` lines. Its output flow declares the input's `interlace_mode`,
+  `grain_rate` and frame size, so MXL gives it the same field grains at the field rate; output
+  grain index = input grain index, so the field order passes through (even indices are the
+  first field: top for tff, bottom for bff).
+- **Timing in fields.** The hold, the gap fill, the stall threshold, the catch-up and the head
+  probe (§5.3) use the flow's grain rate, the field rate.
+- Interlaced input runs in whole-grain mode (`fallback_reason` `interlaced`): one field of delay.
+- The preview shows a field at the frame's aspect.
+- **Grain check.** Every source grain and every output grain is checked against the declared
+  format: at least `lines × v210 line length` bytes and exactly `lines` slices (v210: one slice per
+  line). The flow's grain rate (`mxlFlowInfo.config`) must be the declared one (doubled when
+  interlaced). A mismatch is never read or written past the grain's end: the grain is skipped,
+  the state is `unsupported`, `unsupported_grains_total` counts it (once per grain period for a
+  rate mismatch), and `unsupported_grain` is logged with the sizes at most every 5 s. The next
+  grain that fits, or a new route, runs again. 1.2.2 read a 1080i field as 1080 lines and
+  crashed (SIGSEGV).
+- **NMOS.** The output flow and sender carry the input's `interlace_mode`. The receiver's caps
+  have two constraint sets: progressive at 24000/1001 … 60/1, and `interlaced_tff` or
+  `interlaced_bff` at 25/1 and 30000/1001.
+
 ---
 
 ## 6. NMOS
@@ -297,7 +325,8 @@ reader still holds the old file; its head stands, and a read past it returns
   a split/wipe view option; the two colour wheels; sliders for gain, pedestal,
   brightness, saturation; bypass, A/B, presets, reset; state (`waiting`, `running`,
   `whole-grain fallback`, `holding` (source gone or stalled), `no_signal` (held past
-  `CC_HOLD_MAX_S`), §5.3), clip indicator.
+  `CC_HOLD_MAX_S`), §5.3, `unsupported` (grains that do not match the flow's format, §5.4)),
+  clip indicator.
 - **Overview**: all channels with state, routed source label, bypass/A-B state.
 - **NMOS** and **Settings** pages like the siblings.
 - 1.1.0: the LeeO86 family look (mxl-webrtc-monitor, mxl-replay, mxl-multiviewer,
@@ -382,7 +411,9 @@ Per channel: `channel_state`, `grains_processed_total`, `slice_mode` (1/0),
 output slice commit), `processing_seconds` (histogram per grain),
 `late_grains_total`, `clipped_ratio`, `bypass`, `settings_changes_total`,
 `flow_reopens_total` (source flows re-opened after they were deleted or re-created under the
-same id, §5.3; 1.2.1); `channel_state` has the states `holding` and `no_signal` (1.2.1); process CPU. Grafana dashboard in `deploy/grafana/`.
+same id, §5.3; 1.2.1); `channel_state` has the states `holding` and `no_signal` (1.2.1) and
+`unsupported` (1.2.3); `unsupported_grains_total` (grains skipped because they do not match the
+flow's format, §5.4; 1.2.3); process CPU. Grafana dashboard in `deploy/grafana/`.
 
 ---
 
@@ -406,7 +437,10 @@ same id, §5.3; 1.2.1); `channel_state` has the states `holding` and `no_signal`
   - the held output (`test_hold.cpp`): held grains keep the output's timing for a source
     behind or ahead of the clock; a re-created source 12 grains behind the clock resumes
     right after the held grains and never at or below them (also over 20 000 random cases);
-    `CC_HOLD_MAX_S` and the black picture.
+    `CC_HOLD_MAX_S` and the black picture;
+  - interlaced input (`test_interlace.cpp`, and `test_interlaced.cpp` on a real MXL domain): the
+    field geometry and rate, the grain check, the mirrored output flow_def (MXL makes it 540-line
+    fields at 50/1 for 1080i50), the preview aspect, the NMOS caps and flow (1.2.3).
 - Integration (CI): a test writer (mxl-test-player or a small tool) produces a
   1080p50 flow with slice commits; the corrector channel is activated via IS-05;
   bars and greyscale ramp are measured at the output for a set of control changes;
@@ -421,6 +455,11 @@ same id, §5.3; 1.2.1); `channel_state` has the states `holding` and `no_signal`
   each time and counts one re-open per re-created flow. Its output head advances while the
   source is away, turns black and invalid after the limit, and never goes back. No output grain
   is refused, and the process stays below 0.6 cores after a re-create.
+  `tests/integration/interlaced.py` (1.2.3): 1080i50 tff and bff; the output declares the
+  input's mode at 25/1 and carries 540-line grains at 50/1, even grains are the first field, a
+  gain moves both fields, the output runs at 50 grains/s with no invalid grain and holds at that
+  rate; flows whose `flow_def.json` does not match their grains leave the channel
+  `unsupported`, counted, running.
 - NMOS conformance: AMWA IS-04-01, IS-05-01, IS-05-02, BCP-007-03-01.
 - Performance (documented): channels per Precision 3930 core at 1080p50 and
   2160p50, with and without RGB gamut clip.

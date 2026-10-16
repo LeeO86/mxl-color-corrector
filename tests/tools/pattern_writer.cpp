@@ -64,8 +64,13 @@ int main(int argc, char** argv)
     int const lagGrains = argInt(argc, argv, "--lag-grains", 0);
     // Write domain_def.json only this long after the flow (a domain made again in that order).
     int const lateDomainDefMs = argInt(argc, argv, "--late-domain-def", 0);
+    // interlaced_tff / interlaced_bff: --rate is the frame rate (25 or 30000/1001 as 30); each MXL
+    // grain is one field (height / 2 lines) at twice it. Even indices are the first field: the top
+    // field (even frame rows) for tff, the bottom field (odd rows) for bff. The bottom field's bars
+    // run the other way (black first), so a reader can tell the fields apart.
     auto interlace = arg(argc, argv, "--interlace", "progressive");
-    if (width % 2 || width < 2 || height < 1 || sliceLines < 1) return 2;
+    bool const interlaced = interlace == "interlaced_tff" || interlace == "interlaced_bff";
+    if (width % 2 || width < 2 || height < 1 || sliceLines < 1 || (interlaced && height % 2)) return 2;
 
     std::filesystem::create_directories(domain);
     auto writeDomainDef = [&] {
@@ -83,10 +88,12 @@ int main(int argc, char** argv)
         std::cerr << "mxlCreateInstance failed\n";
         return 1;
     }
+    int const rateNum = interlaced && rate == 30 ? 30000 : rate;
+    int const rateDen = interlaced && rate == 30 ? 1001 : 1;
     std::string json = std::string("{\n  \"id\": \"") + flowId + "\",\n  \"label\": \"CC bars\",\n  \"description\": \"bars and ramp\",\n"
         "  \"format\": \"urn:x-nmos:format:video\",\n  \"media_type\": \"video/v210\",\n"
         "  \"tags\": {\"urn:x-nmos:tag:grouphint/v1.0\": [\"Bars:Video\"]},\n  \"grain_rate\": {\"numerator\": " +
-        std::to_string(rate) + ", \"denominator\": 1},\n  \"frame_width\": " + std::to_string(width) + ",\n  \"frame_height\": " + std::to_string(height) +
+        std::to_string(rateNum) + ", \"denominator\": " + std::to_string(rateDen) + "},\n  \"frame_width\": " + std::to_string(width) + ",\n  \"frame_height\": " + std::to_string(height) +
         ",\n  \"interlace_mode\": \"" + interlace + "\",\n  \"colorspace\": \"BT709\",\n  \"components\": [\n"
         "    {\"name\": \"Y\", \"width\": " + std::to_string(width) + ", \"height\": " + std::to_string(height) + ", \"bit_depth\": 10},\n"
         "    {\"name\": \"Cb\", \"width\": " + std::to_string(width / 2) + ", \"height\": " + std::to_string(height) + ", \"bit_depth\": 10},\n"
@@ -117,7 +124,7 @@ int main(int argc, char** argv)
         {
             if (row < split)
             {
-                int const band = std::min(7, x / barW);
+                int const band = interlaced && (row % 2) == 1 ? 7 - std::min(7, x / barW) : std::min(7, x / barW);
                 putPixel(y, cb, cr, x, bars[band][0], bars[band][1], bars[band][2]);
             }
             else
@@ -128,7 +135,9 @@ int main(int argc, char** argv)
         }
         cc::packV210Line(frame.data() + static_cast<std::size_t>(row * stride), width, stride, y.data(), cb.data(), cr.data());
     }
-    mxlRational edit{rate, 1};
+    // MXL indexes an interlaced flow by field.
+    mxlRational edit{interlaced ? rateNum * 2 : rateNum, rateDen};
+    int const grainLines = interlaced ? height / 2 : height;
     auto index = mxlGetCurrentIndex(&edit) - static_cast<std::uint64_t>(std::max(lagGrains, 0));
     auto const until = std::chrono::steady_clock::now() + std::chrono::seconds(seconds);
     std::cerr << "{\"flow\":\"" << flowId << "\",\"domain\":\"" << domainId << "\",\"index\":" << index << "}\n";
@@ -139,18 +148,30 @@ int main(int argc, char** argv)
         mxlGrainInfo info{};
         std::uint8_t* payload = nullptr;
         if (mxlFlowWriterOpenGrain(writer, index, &info, &payload) != MXL_STATUS_OK || payload == nullptr) break;
-        int written = 0;
-        while (written < height)
+        if (info.grainSize < static_cast<std::size_t>(stride) * static_cast<std::size_t>(grainLines))
         {
-            int const n = std::min(sliceLines, height - written);
-            std::memcpy(payload + static_cast<std::size_t>(written) * static_cast<std::size_t>(stride),
-                frame.data() + static_cast<std::size_t>(written) * static_cast<std::size_t>(stride), static_cast<std::size_t>(n) * static_cast<std::size_t>(stride));
+            std::cerr << "grain of " << info.grainSize << " bytes is smaller than " << grainLines << " lines\n";
+            mxlFlowWriterCancelGrain(writer);
+            break;
+        }
+        // The frame rows of this grain: all of them, or one field's.
+        int const parity = !interlaced ? 0 : ((index % 2 == 0) == (interlace == "interlaced_tff") ? 0 : 1);
+        int const rowStep = interlaced ? 2 : 1;
+        int written = 0;
+        while (written < grainLines)
+        {
+            int const n = std::min(sliceLines, grainLines - written);
+            for (int line = written; line < written + n; ++line)
+            {
+                std::memcpy(payload + static_cast<std::size_t>(line) * static_cast<std::size_t>(stride),
+                    frame.data() + static_cast<std::size_t>(line * rowStep + parity) * static_cast<std::size_t>(stride), static_cast<std::size_t>(stride));
+            }
             written += n;
             info.index = index;
             info.flags = 0;
-            info.validSlices = static_cast<std::uint16_t>(std::min(written, height));
+            info.validSlices = static_cast<std::uint16_t>(std::min(written, grainLines));
             if (mxlFlowWriterCommitGrain(writer, &info) != MXL_STATUS_OK) break;
-            if (sleepUs > 0 && written < height) ::usleep(static_cast<useconds_t>(sleepUs));
+            if (sleepUs > 0 && written < grainLines) ::usleep(static_cast<useconds_t>(sleepUs));
         }
         ++index;
     }

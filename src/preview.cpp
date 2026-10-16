@@ -17,13 +17,14 @@
 namespace cc
 {
 
-std::vector<std::uint8_t> encodePreviewJpeg(std::uint8_t const* v210, int width, int height, int stride, int maxWidth)
+std::vector<std::uint8_t> encodePreviewJpeg(std::uint8_t const* v210, int width, int height, int stride, int maxWidth, int displayHeight)
 {
     if (v210 == nullptr || width < 2 || height < 1 || stride <= 0) return {};
     int outW = std::min(width, maxWidth);
     if (outW % 2) --outW;
     if (outW < 2) outW = 2;
-    int const outH = std::max(1, height * outW / width);
+    int const shownHeight = displayHeight > 0 ? displayHeight : height;
+    int const outH = std::max(1, shownHeight * outW / width);
     std::vector<std::uint8_t> rgb(static_cast<std::size_t>(outW * outH * 3));
     for (int y = 0; y < outH; ++y)
     {

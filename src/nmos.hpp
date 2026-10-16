@@ -29,6 +29,9 @@ struct OutputFormat
     int rateNum = 50;
     int rateDen = 1;
     bool interlaced = false;
+    // IS-04 interlace_mode, as the input's flow_def (interlaced_tff or interlaced_bff). grain_rate
+    // stays the declared frame rate, as IS-04 has it for interlaced video; MXL's grains are fields.
+    std::string interlaceMode = "progressive";
     std::string colorspace = "BT709";
 };
 

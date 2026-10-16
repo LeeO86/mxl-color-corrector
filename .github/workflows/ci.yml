@@ -54,6 +54,10 @@ jobs:
         run: python3 tests/integration/reopen.py
         env:
           CC_BUILD: build
+      - name: interlaced input (1080i50 fields)
+        run: python3 tests/integration/interlaced.py
+        env:
+          CC_BUILD: build
 
   # The AVX-512 code under Intel SDE (Software Development Emulator), because a hosted runner may have
   # no AVX-512 (EPYC 7763). SDE emulates the chip's cpuid and stops on an instruction the chip does
