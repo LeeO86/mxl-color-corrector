@@ -9,6 +9,7 @@
 #include "util/log.hpp"
 #include "util/uuid.hpp"
 #include "v210.hpp"
+#include "video_format.hpp"
 
 #include <mxl/flow.h>
 #include <mxl/mxl.h>
@@ -46,65 +47,6 @@ std::string readFile(std::filesystem::path const& path)
     std::stringstream buffer;
     buffer << in.rdbuf();
     return buffer.str();
-}
-
-struct VideoFormat
-{
-    int width = 1920;
-    int height = 1080;
-    int rateNum = 50;
-    int rateDen = 1;
-    std::string interlace = "progressive";
-    std::string colorspace = "BT709";
-    std::string media = "video/v210";
-    std::string label;
-    bool operator==(VideoFormat const& other) const
-    {
-        return width == other.width && height == other.height && rateNum == other.rateNum && rateDen == other.rateDen && interlace == other.interlace &&
-               media == other.media;
-    }
-};
-
-bool parseFlow(std::string const& text, VideoFormat& format)
-{
-    if (text.empty()) return false;
-    try
-    {
-        auto doc = parseJson(text);
-        if (auto const* w = doc.find("frame_width")) format.width = static_cast<int>(w->num());
-        if (auto const* h = doc.find("frame_height")) format.height = static_cast<int>(h->num());
-        if (auto const* rate = doc.find("grain_rate"); rate && rate->isObject())
-        {
-            if (auto const* n = rate->find("numerator")) format.rateNum = static_cast<int>(n->num());
-            if (auto const* d = rate->find("denominator")) format.rateDen = std::max(1, static_cast<int>(d->num()));
-        }
-        if (auto const* mode = doc.find("interlace_mode")) format.interlace = mode->text();
-        if (auto const* cs = doc.find("colorspace")) format.colorspace = cs->text();
-        if (auto const* media = doc.find("media_type")) format.media = media->text();
-        if (auto const* label = doc.find("label")) format.label = label->text();
-        return format.width >= 2 && format.height >= 1 && format.media == "video/v210";
-    }
-    catch (JsonError const&)
-    {
-        return false;
-    }
-}
-
-std::string flowJson(std::string const& id, std::string const& label, std::string const& group, VideoFormat const& format, std::string const& sourceId,
-    std::string const& deviceId)
-{
-    std::ostringstream os;
-    os << "{\n  \"id\": \"" << id << "\",\n  \"label\": \"" << label << "\",\n  \"description\": \"" << label
-       << "\",\n  \"format\": \"urn:x-nmos:format:video\",\n  \"media_type\": \"video/v210\",\n"
-       << "  \"tags\": {\"urn:x-nmos:tag:grouphint/v1.0\": [\"" << group << "\"]},\n"
-       << "  \"grain_rate\": {\"numerator\": " << format.rateNum << ", \"denominator\": " << format.rateDen << "},\n"
-       << "  \"frame_width\": " << format.width << ",\n  \"frame_height\": " << format.height << ",\n"
-       << "  \"interlace_mode\": \"" << format.interlace << "\",\n  \"colorspace\": \"" << format.colorspace << "\",\n"
-       << "  \"source_id\": \"" << sourceId << "\",\n  \"device_id\": \"" << deviceId << "\",\n  \"parents\": [],\n  \"components\": [\n"
-       << "    {\"name\": \"Y\", \"width\": " << format.width << ", \"height\": " << format.height << ", \"bit_depth\": 10},\n"
-       << "    {\"name\": \"Cb\", \"width\": " << format.width / 2 << ", \"height\": " << format.height << ", \"bit_depth\": 10},\n"
-       << "    {\"name\": \"Cr\", \"width\": " << format.width / 2 << ", \"height\": " << format.height << ", \"bit_depth\": 10}\n  ]\n}\n";
-    return os.str();
 }
 
 std::string lower(std::string text)
@@ -277,7 +219,14 @@ struct Engine::Impl
         mxlFlowWriter writer = nullptr;
         std::string writerFlow;
         VideoFormat current{};
+        GrainGeometry geo{}; // the grain layout of `current`: a field of an interlaced flow
         bool haveFormat = false;
+        // A grain whose size or slice count does not match the flow's declared format (or a flow
+        // whose grain rate does not) is never read or written past its end: the channel skips it
+        // and reports `unsupported` until it processes a grain again.
+        bool unsupported = false;
+        double unsupportedLogDue = 0;
+        std::uint64_t unsupportedOut = MXL_UNDEFINED_INDEX; // the last output grain counted as unsupported
         std::uint64_t index = 0;
         bool synced = false;
         int backoffMs = 50;
@@ -307,8 +256,7 @@ struct Engine::Impl
         double watchDue = 0;
         std::uint64_t lastOut = MXL_UNDEFINED_INDEX; // last whole output grain committed
         bool holding = false;
-        std::vector<std::uint8_t> heldFrame;
-        std::uint32_t heldFlags = 0;
+        hold::HeldPicture held;      // the last output grain, or of an interlaced flow the last field of each parity
         std::uint64_t heldGrains = 0;
         std::int64_t outPhase = 0;   // hold::phaseOf at the last committed output grain
         bool holdBlack = false;      // past CC_HOLD_MAX_S: black, flagged invalid
@@ -344,7 +292,7 @@ struct Engine::Impl
             stallHold = false;
             holdBlack = false;
             phaseWait = false;
-            heldFrame.clear();
+            held.clear();
         };
         auto releaseAll = [&] {
             closeReader();
@@ -366,27 +314,33 @@ struct Engine::Impl
             watchFiles = flowFiles(watchDir, flowId);
             watchDue = now + 0.02;
         };
-        // The last whole output grain, read back from this channel's own output flow.
+        // The last whole output grain, read back from this channel's own output flow; of an
+        // interlaced flow also the one before it (the other field), so the held frame keeps both.
         auto captureHeld = [&] {
-            heldFrame.clear();
+            held.clear();
             if (writer == nullptr || output == nullptr || lastOut == MXL_UNDEFINED_INDEX) return;
             mxlFlowReader own = nullptr;
             if (mxlCreateFlowReader(output, writerFlow.c_str(), nullptr, &own) != MXL_STATUS_OK || own == nullptr) return;
-            mxlGrainInfo grain{};
-            std::uint8_t* payload = nullptr;
-            if (mxlFlowReaderGetGrainNonBlocking(own, lastOut, &grain, &payload) == MXL_STATUS_OK && payload != nullptr)
-            {
-                heldFrame.assign(payload, payload + grain.grainSize);
-                heldFlags = grain.flags;
-            }
+            auto keep = [&](std::uint64_t at, bool otherField) {
+                mxlGrainInfo grain{};
+                std::uint8_t* payload = nullptr;
+                if (mxlFlowReaderGetGrainNonBlocking(own, at, &grain, &payload) != MXL_STATUS_OK || payload == nullptr) return;
+                // The other field only when it is the grain asked for and valid; otherwise the
+                // last field fills both parities.
+                if (otherField && !hold::keepOtherField(at, grain.index, (grain.flags & MXL_GRAIN_FLAG_INVALID) != 0)) return;
+                held.set(at, payload, grain.grainSize, grain.flags, geo.interlaced);
+            };
+            keep(lastOut, false);
+            if (geo.interlaced && !held.empty() && lastOut > 0) keep(lastOut - 1, true);
             mxlReleaseFlowReader(output, own);
         };
         // A writer that pauses up to this long and then catches up in sequence loses nothing;
         // a longer silence is held (a killed writer). A restart takes 1–2 s, so it is still bridged.
-        auto stallSeconds = [&] { return std::max(0.25, 10.0 * current.rateDen / std::max(current.rateNum, 1)); };
-        auto catchUp = [&] { return hold::catchUpGrains(stallSeconds(), current.rateNum, current.rateDen); };
+        // All in grains of the flow: fields of an interlaced flow (twice its declared frame rate).
+        auto stallSeconds = [&] { return std::max(0.25, 10.0 * geo.rateDen / std::max(geo.rateNum, 1)); };
+        auto catchUp = [&] { return hold::catchUpGrains(stallSeconds(), geo.rateNum, geo.rateDen); };
         // How many grains one fill may write (hold::fillCap): about the catch-up, at most 256 MB.
-        auto fillCap = [&] { return hold::fillCap(catchUp(), heldFrame.size()); };
+        auto fillCap = [&] { return hold::fillCap(catchUp(), held.grainBytes()); };
         // 3 holding, 4 no_signal (black after CC_HOLD_MAX_S), 0 waiting.
         auto holdState = [&] { return holding ? (holdBlack ? 4 : 3) : 0; };
         // Writes the held grain at [first, last].
@@ -396,9 +350,10 @@ struct Engine::Impl
                 mxlGrainInfo info{};
                 std::uint8_t* payload = nullptr;
                 if (mxlFlowWriterOpenGrain(writer, next, &info, &payload) != MXL_STATUS_OK || payload == nullptr) return;
-                std::memcpy(payload, heldFrame.data(), std::min<std::size_t>(heldFrame.size(), info.grainSize));
+                auto const& grain = held.at(next);
+                std::memcpy(payload, grain.data.data(), std::min<std::size_t>(grain.data.size(), info.grainSize));
                 info.index = next;
-                info.flags = heldFlags;
+                info.flags = grain.flags;
                 info.validSlices = info.totalSlices;
                 if (mxlFlowWriterCommitGrain(writer, &info) != MXL_STATUS_OK) return;
                 lastOut = next;
@@ -407,17 +362,16 @@ struct Engine::Impl
         };
         // Repeats the held grain in the output's own timing, up to now.
         auto emitHeld = [&] {
-            if (!holding || writer == nullptr || heldFrame.empty() || lastOut == MXL_UNDEFINED_INDEX || outOpen) return;
+            if (!holding || writer == nullptr || held.empty() || lastOut == MXL_UNDEFINED_INDEX || outOpen) return;
             if (!holdBlack && hold::expired(monoNow(), lostAt, config.holdMaxS))
             {
-                heldFrame = hold::blackV210(current.width, current.height, heldFrame.size());
-                heldFlags = MXL_GRAIN_FLAG_INVALID;
+                held.black(current.width, geo.lines, MXL_GRAIN_FLAG_INVALID);
                 holdBlack = true;
                 logWarn("mxl_hold_expired channel=" + ch + " source=" + routeKey + " after_s=" + std::to_string(config.holdMaxS) +
                         ", output black grains flagged invalid (no_signal)");
             }
             if (phaseWait) return;
-            mxlRational rate{current.rateNum, current.rateDen};
+            mxlRational rate{geo.rateNum, geo.rateDen};
             auto const range = hold::heldRange(mxlGetCurrentIndex(&rate), outPhase, lastOut, fillCap());
             writeHeld(range.first, range.last);
         };
@@ -427,8 +381,8 @@ struct Engine::Impl
         double gapLogDue = 0;
         auto fillGap = [&](std::uint64_t next) {
             if (lastOut == MXL_UNDEFINED_INDEX || next <= lastOut + 1 || writer == nullptr) return;
-            if (heldFrame.empty()) captureHeld();
-            if (heldFrame.empty()) return;
+            if (held.empty()) captureHeld();
+            if (held.empty()) return;
             auto const range = hold::fillRange(lastOut, next, fillCap());
             auto const gap = next - lastOut - 1;
             auto const t0 = monoNow();
@@ -436,7 +390,7 @@ struct Engine::Impl
             if (auto const now = monoNow(); now >= gapLogDue)
             {
                 logInfo("output_gap_filled channel=" + ch + " gap=" + std::to_string(gap) + " grains=" + std::to_string(range.last - range.first + 1) +
-                        " ms=" + std::to_string(static_cast<long>((now - t0) * 1000.0)) + " (repeated the last output grain)");
+                        " ms=" + std::to_string(static_cast<long>((now - t0) * 1000.0)) + " (repeated the last output grain, or field of the same parity)");
                 gapLogDue = now + 5.0;
             }
         };
@@ -457,6 +411,26 @@ struct Engine::Impl
                         (lastOut == MXL_UNDEFINED_INDEX ? std::string("none") : std::to_string(lastOut)) + " failures=" + std::to_string(writeFailures));
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        };
+        // A grain (or flow) that does not match the declared format: counted (unless `count` is
+        // false: another slice of a grain already counted), logged at most every 5 s, skipped.
+        auto markUnsupported = [&](std::string const& route, std::string const& what, bool count = true) {
+            if (outOpen && writer)
+            {
+                mxlFlowWriterCancelGrain(writer);
+                outOpen = false;
+            }
+            produced = 0;
+            grainCpu = 0;
+            unsupported = true;
+            if (count) runtime.addUnsupported(channel);
+            if (auto const now = monoNow(); now >= unsupportedLogDue)
+            {
+                logWarn("unsupported_grain channel=" + ch + " source=" + route + " " + what + " expected lines=" + std::to_string(geo.lines) +
+                        " bytes=" + std::to_string(geo.bytes) + " rate=" + std::to_string(geo.rateNum) + "/" + std::to_string(geo.rateDen) + " (" +
+                        current.interlace + "), skipped");
+                unsupportedLogDue = now + 5.0;
+            }
         };
         auto lostSource = [&](std::string const& route, std::string const& reason) {
             closeReader();
@@ -479,7 +453,7 @@ struct Engine::Impl
                 heldGrains = 0;
                 holdBlack = false;
                 captureHeld();
-                holding = !heldFrame.empty();
+                holding = !held.empty();
             }
             resumePending = true;
             logInfo(std::string(reason == "read_error" ? "mxl_reader_error" : "mxl_flow_recreated") + " channel=" + ch + " source=" + route +
@@ -591,6 +565,8 @@ struct Engine::Impl
                 lastWrite = 0;
                 writeSeenAt = now;
                 current = format;
+                geo = grainGeometry(format);
+                unsupported = false;
                 haveFormat = true;
                 backoffMs = 50;
                 auto flowId = uuidV5("mxl-color-corrector/" + config.nmosSeed + "/ch/" + ch + "/flow/" + std::to_string(format.width) + "x" +
@@ -603,7 +579,8 @@ struct Engine::Impl
                     auto label = "CC " + ch + " Video";
                     auto json = flowJson(flowId, label, "CC " + ch + ":Video", format, sourceId, nmos.deviceId());
                     bool created = false;
-                    if (mxlCreateFlowWriter(output, json.c_str(), nullptr, &writer, nullptr, &created) != MXL_STATUS_OK || writer == nullptr)
+                    mxlFlowConfigInfo outConfig{};
+                    if (mxlCreateFlowWriter(output, json.c_str(), nullptr, &writer, &outConfig, &created) != MXL_STATUS_OK || writer == nullptr)
                     {
                         logError("mxlCreateFlowWriter failed for channel " + ch);
                         closeReader();
@@ -617,15 +594,18 @@ struct Engine::Impl
                     published.height = format.height;
                     published.rateNum = format.rateNum;
                     published.rateDen = format.rateDen;
-                    published.interlaced = format.interlace != "progressive";
+                    published.interlaced = isInterlaced(format.interlace);
+                    published.interlaceMode = published.interlaced ? format.interlace : "progressive";
                     published.colorspace = format.colorspace.empty() ? "BT709" : format.colorspace;
                     nmos.setOutput(channel, published);
-                    logInfo(std::string(created ? "created" : "opened") + " output flow " + flowId);
+                    logInfo(std::string(created ? "created" : "opened") + " output flow " + flowId + " " + std::to_string(format.width) + "x" +
+                            std::to_string(format.height) + " " + format.interlace + " grain_rate " + std::to_string(outConfig.common.grainRate.numerator) + "/" +
+                            std::to_string(outConfig.common.grainRate.denominator) + (geo.interlaced ? " (one field per grain, " + std::to_string(geo.lines) + " lines)" : ""));
                 }
                 std::string warning = isBt709(format.colorspace) ? "" : "flow colorimetry is " + format.colorspace + ", processing as BT.709";
                 if (!warning.empty()) logWarn("channel " + ch + " " + warning);
                 runtime.setRoute(channel, format.label.empty() ? route.flowId : format.label, route.domainId, route.flowId, writerFlow, warning, format.width,
-                    format.height, format.rateNum, format.rateDen, format.interlace != "progressive");
+                    format.height, format.rateNum, format.rateDen, isInterlaced(format.interlace));
             }
             if (!haveFormat || reader == nullptr || writer == nullptr)
             {
@@ -650,7 +630,7 @@ struct Engine::Impl
                     lastHead = head;
                     headSeenAt = now;
                 }
-                else if (now >= probeDue && now - headSeenAt > std::max(0.02, 2.0 * current.rateDen / std::max(current.rateNum, 1)))
+                else if (now >= probeDue && now - headSeenAt > std::max(0.02, 2.0 * geo.rateDen / std::max(geo.rateNum, 1)))
                 {
                     probeDue = now + 0.02;
                     if (!source.valid())
@@ -683,7 +663,7 @@ struct Engine::Impl
                     produced = 0;
                     grainCpu = 0;
                     captureHeld();
-                    holding = !heldFrame.empty();
+                    holding = !held.empty();
                     if (holding)
                     {
                         stallHold = true;
@@ -696,14 +676,30 @@ struct Engine::Impl
                     }
                 }
             }
-            int const lineBytes = v210Stride(current.width);
+            {
+                // MXL indexes an interlaced flow by field (twice the declared rate). A flow whose
+                // grain rate is not what its flow_def.json declares is not read.
+                auto const rate = info.config.common.grainRate;
+                if (static_cast<std::int64_t>(rate.numerator) * geo.rateDen != static_cast<std::int64_t>(geo.rateNum) * rate.denominator || rate.denominator == 0)
+                {
+                    // Counted once per source grain period. A hold that was running goes on (and
+                    // turns black after CC_HOLD_MAX_S); its state is shown while it lasts.
+                    markUnsupported(key, "flow grain_rate=" + std::to_string(rate.numerator) + "/" + std::to_string(rate.denominator));
+                    emitHeld();
+                    runtime.setState(channel, holding ? holdState() : 5, 0, static_cast<int>(logged));
+                    auto const periodMs = rate.numerator > 0 ? 1000 * static_cast<std::int64_t>(rate.denominator) / rate.numerator : 20;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(std::clamp<std::int64_t>(periodMs, 5, 100)));
+                    continue;
+                }
+            }
+            int const lineBytes = geo.lineBytes;
             auto const sliceBytes = info.config.discrete.sliceSizes[0];
-            auto const totalHint = current.height > 0 && lineBytes > 0 && sliceBytes >= static_cast<std::uint32_t>(lineBytes) &&
+            auto const totalHint = geo.lines > 0 && lineBytes > 0 && sliceBytes >= static_cast<std::uint32_t>(lineBytes) &&
                                             sliceBytes % static_cast<std::uint32_t>(lineBytes) == 0
-                                        ? current.height / static_cast<int>(sliceBytes / static_cast<std::uint32_t>(lineBytes))
+                                        ? geo.lines / static_cast<int>(sliceBytes / static_cast<std::uint32_t>(lineBytes))
                                         : 0;
             bool const commits = sawPartial || completeOnly < 4;
-            auto decision = decideMode(current.interlace != "progressive", commits, current.height, totalHint, sliceBytes, lineBytes);
+            auto decision = decideMode(geo.interlaced, commits, geo.lines, totalHint, sliceBytes, lineBytes);
             if (decision.reason != logged)
             {
                 if (outOpen && writer)
@@ -716,7 +712,7 @@ struct Engine::Impl
                 logInfo("channel " + ch + " mode " + (decision.slice ? "slice" : std::string("whole-grain:") + fallbackName(decision.reason)));
                 logged = decision.reason;
             }
-            int const state = holding ? holdState() : decision.slice ? 1 : 2;
+            int const state = holding ? holdState() : unsupported ? 5 : decision.slice ? 1 : 2;
             runtime.setState(channel, state, decision.slice ? 1 : 0, static_cast<int>(decision.reason));
             if (stallHold)
             {
@@ -820,6 +816,15 @@ struct Engine::Impl
                     }
                     outOpen = true;
                     produced = 0;
+                    if (!grainFits(geo, outInfo.grainSize, outInfo.totalSlices))
+                    {
+                        // Slice mode opens the grain again for each slice: count it once.
+                        bool const first = index != unsupportedOut;
+                        unsupportedOut = index;
+                        markUnsupported(key, "output grain_size=" + std::to_string(outInfo.grainSize) + " total_slices=" + std::to_string(outInfo.totalSlices),
+                            first);
+                        return true;
+                    }
                 }
                 ProcessStats stats;
                 bool invalid = (grain.flags & MXL_GRAIN_FLAG_INVALID) != 0;
@@ -830,11 +835,11 @@ struct Engine::Impl
                 }
                 else if (input && outPayload)
                 {
-                    processV210(input, outPayload, current.width, current.height, lineBytes, lineBytes, row0, row1, matrix, &stats);
+                    processV210(input, outPayload, current.width, geo.lines, lineBytes, lineBytes, row0, row1, matrix, &stats);
                 }
                 outInfo.index = index;
                 outInfo.flags = grain.flags;
-                std::uint16_t lines = invalid ? outInfo.totalSlices : static_cast<std::uint16_t>(std::min(current.height, row1));
+                std::uint16_t lines = invalid ? outInfo.totalSlices : static_cast<std::uint16_t>(std::min(geo.lines, row1));
                 if (lines > outInfo.totalSlices) lines = outInfo.totalSlices;
                 outInfo.validSlices = lines;
                 auto committed = mxlFlowWriterCommitGrain(writer, &outInfo);
@@ -851,16 +856,18 @@ struct Engine::Impl
                 if (done)
                 {
                     lastOut = index;
-                    if (!holding && !heldFrame.empty()) heldFrame.clear();
+                    unsupported = false;
+                    if (!holding && !held.empty()) held.clear();
                     writeFailures = 0;
-                    mxlRational rate{current.rateNum, current.rateDen};
+                    mxlRational rate{geo.rateNum, geo.rateDen};
                     outPhase = hold::phaseOf(index, mxlGetCurrentIndex(&rate));
                     runtime.addGrain(channel, matrix.bypass, stats.clipped, stats.samples == 0 ? 1 : stats.samples, sliceSeconds, grainCpu, t1);
                     grainCpu = 0;
                     if (t1 >= previewDue && input && outPayload)
                     {
-                        runtime.setPreview(channel, encodePreviewJpeg(input, current.width, current.height, lineBytes),
-                            encodePreviewJpeg(outPayload, current.width, current.height, lineBytes));
+                        // A field is shown at the frame's aspect (its lines doubled).
+                        runtime.setPreview(channel, encodePreviewJpeg(input, current.width, geo.lines, lineBytes, 320, current.height),
+                            encodePreviewJpeg(outPayload, current.width, geo.lines, lineBytes, 320, current.height));
                         previewDue = t1 + 1.0 / std::max(1, config.previewFps);
                     }
                 }
@@ -918,14 +925,21 @@ struct Engine::Impl
                     lostSource(key, status == MXL_ERR_FLOW_INVALID ? "flow_invalid" : "read_error");
                     continue;
                 }
+                if (!grainFits(geo, grain.grainSize, grain.totalSlices))
+                {
+                    markUnsupported(key, "grain index=" + std::to_string(index) + " grain_size=" + std::to_string(grain.grainSize) +
+                                             " total_slices=" + std::to_string(grain.totalSlices));
+                    ++index;
+                    continue;
+                }
                 if (grain.validSlices < grain.totalSlices) sawPartial = true;
                 else if (!sawPartial) ++completeOnly;
                 int const rows = static_cast<int>(grain.validSlices) * std::max(linesPerSlice, 1);
                 int const already = static_cast<int>(produced) * std::max(linesPerSlice, 1);
-                if ((grain.flags & MXL_GRAIN_FLAG_INVALID) != 0 || rows >= current.height || grain.validSlices >= grain.totalSlices)
+                if ((grain.flags & MXL_GRAIN_FLAG_INVALID) != 0 || rows >= geo.lines || grain.validSlices >= grain.totalSlices)
                 {
                     int const from = (grain.flags & MXL_GRAIN_FLAG_INVALID) != 0 ? 0 : already;
-                    if (!finishGrain(payload, grain, from, current.height))
+                    if (!finishGrain(payload, grain, from, geo.lines))
                     {
                         outputFailed(key);
                         continue;
@@ -964,7 +978,14 @@ struct Engine::Impl
                     lostSource(key, status == MXL_ERR_FLOW_INVALID ? "flow_invalid" : "read_error");
                     continue;
                 }
-                if (!finishGrain(payload, grain, 0, current.height))
+                if (!grainFits(geo, grain.grainSize, grain.totalSlices))
+                {
+                    markUnsupported(key, "grain index=" + std::to_string(index) + " grain_size=" + std::to_string(grain.grainSize) +
+                                             " total_slices=" + std::to_string(grain.totalSlices));
+                    ++index;
+                    continue;
+                }
+                if (!finishGrain(payload, grain, 0, geo.lines))
                 {
                     outputFailed(key);
                     continue;

@@ -3,6 +3,7 @@
 // The held output of a channel whose source is gone or stalled (SPECIFICATION §5.3): which
 // indices to write, where the output resumes, and when the held picture turns black.
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <vector>
@@ -110,6 +111,58 @@ struct Resume
 [[nodiscard]] inline bool expired(double now, double since, int maxSeconds)
 {
     return maxSeconds > 0 && now - since >= static_cast<double>(maxSeconds);
+}
+
+// The held output picture, repeated by the hold and the gap fill. For progressive video it is
+// the last output grain. An interlaced flow's grains are fields (even indices the first field), so
+// it keeps the last grain of each parity and writes each index with the field of its own parity:
+// a held frame keeps both fields instead of repeating one into both (1.2.3).
+class HeldPicture
+{
+public:
+    struct Grain
+    {
+        std::vector<std::uint8_t> data;
+        std::uint32_t flags = 0;
+    };
+
+    void clear()
+    {
+        slots_[0] = {};
+        slots_[1] = {};
+    }
+    [[nodiscard]] bool empty() const { return slots_[0].data.empty() && slots_[1].data.empty(); }
+    // Keeps output grain `index` (in the slot of its parity when `fields`).
+    void set(std::uint64_t index, std::uint8_t const* data, std::size_t size, std::uint32_t flags, bool fields)
+    {
+        fields_ = fields;
+        auto& slot = slots_[fields ? index % 2 : 0];
+        slot.data.assign(data, data + size);
+        slot.flags = flags;
+    }
+    // The grain to write at output index `index`: the field of its parity, or the other one when
+    // only one was kept. Empty when nothing is held.
+    [[nodiscard]] Grain const& at(std::uint64_t index) const
+    {
+        auto const& own = slots_[fields_ ? index % 2 : 0];
+        return own.data.empty() ? slots_[fields_ ? 1 - index % 2 : 0] : own;
+    }
+    [[nodiscard]] std::size_t grainBytes() const { return std::max(slots_[0].data.size(), slots_[1].data.size()); }
+    // Past CC_HOLD_MAX_S: every kept grain turns black (`lines` lines of `width`), flagged `flags`.
+    void black(int width, int lines, std::uint32_t flags);
+
+private:
+    Grain slots_[2];
+    bool fields_ = false;
+};
+
+// Whether the grain read back at `asked` may be kept as the held picture's other field. MXL's
+// non-blocking read returns whatever its ring slot holds, without checking the slot's own index,
+// and returns grains flagged invalid as OK. So after a route change that re-opens the same output
+// flow, the grain before the last can be the previous route's field, or invalid (1.2.3 review).
+[[nodiscard]] inline bool keepOtherField(std::uint64_t asked, std::uint64_t grainIndex, bool invalid)
+{
+    return grainIndex == asked && !invalid;
 }
 
 // A v210 picture in BT.709 narrow-range black (Y 64, Cb and Cr 512), `size` bytes (a grain may be

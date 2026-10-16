@@ -14,6 +14,7 @@ find_package(Threads REQUIRED)
 
 set(CC_CORE_SOURCES
     src/v210.cpp
+    src/video_format.cpp
     src/hold.cpp
     src/color/controls.cpp
     src/color/process.cpp
@@ -51,6 +52,7 @@ if(CC_BUILD_TESTS)
         tests/unit/test_config.cpp
         tests/unit/test_api.cpp
         tests/unit/test_hold.cpp
+        tests/unit/test_interlace.cpp
     )
     target_include_directories(unit-tests PRIVATE src third_party)
     target_link_libraries(unit-tests PRIVATE cc_core)
@@ -192,7 +194,7 @@ inline std::string_view indexHtml() {
 
     if(CC_BUILD_TESTS)
         # Unit tests on a real MXL domain in a temporary directory (re-created flows).
-        add_executable(unit-tests-mxl tests/unit/test_main.cpp tests/mxl/test_flow_reopen.cpp src/mxl_source.cpp)
+        add_executable(unit-tests-mxl tests/unit/test_main.cpp tests/mxl/test_flow_reopen.cpp tests/mxl/test_interlaced.cpp src/mxl_source.cpp)
         target_include_directories(unit-tests-mxl PRIVATE src third_party)
         target_link_libraries(unit-tests-mxl PRIVATE cc_core mxl::mxl)
         target_compile_options(unit-tests-mxl PRIVATE -Wall -Wextra -Wno-unused-parameter)

@@ -286,6 +286,8 @@ std::string NmosNode::receiverJson(Channel const& channel, std::string const& ve
     std::ostringstream os;
     os << "{\"id\":\"" << channel.receiverId << "\",\"version\":\"" << version << "\",\"label\":\"" << escape(label)
        << "\",\"description\":\"MXL colour corrector video receiver\",\"format\":\"urn:x-nmos:format:video\","
+       // Two constraint sets: progressive at any of these rates; interlaced (tff or bff, the modes MXL
+       // carries, as fields) at the frame rates MXL allows for it, 25 and 30000/1001 (1080i50, 1080i59.94).
        << "\"caps\":{\"media_types\":[\"video/v210\"],\"constraint_sets\":[{\"urn:x-nmos:cap:format:media_type\":{\"enum\":[\"video/v210\"]},"
        << "\"urn:x-nmos:cap:format:grain_rate\":{\"enum\":[{\"numerator\":24000,\"denominator\":1001},{\"numerator\":24,\"denominator\":1},"
        << "{\"numerator\":25,\"denominator\":1},{\"numerator\":30000,\"denominator\":1001},{\"numerator\":30,\"denominator\":1},"
@@ -294,7 +296,14 @@ std::string NmosNode::receiverJson(Channel const& channel, std::string const& ve
        << "\"urn:x-nmos:cap:format:frame_height\":{\"minimum\":2,\"maximum\":2160},"
        << "\"urn:x-nmos:cap:format:color_sampling\":{\"enum\":[\"YCbCr-4:2:2\"]},"
        << "\"urn:x-nmos:cap:format:component_depth\":{\"enum\":[10]},"
-       << "\"urn:x-nmos:cap:format:interlace_mode\":{\"enum\":[\"progressive\",\"interlaced_tff\",\"interlaced_bff\",\"interlaced_psf\"]}}],"
+       << "\"urn:x-nmos:cap:format:interlace_mode\":{\"enum\":[\"progressive\"]}},"
+       << "{\"urn:x-nmos:cap:format:media_type\":{\"enum\":[\"video/v210\"]},"
+       << "\"urn:x-nmos:cap:format:grain_rate\":{\"enum\":[{\"numerator\":25,\"denominator\":1},{\"numerator\":30000,\"denominator\":1001}]},"
+       << "\"urn:x-nmos:cap:format:frame_width\":{\"minimum\":2,\"maximum\":3840},"
+       << "\"urn:x-nmos:cap:format:frame_height\":{\"minimum\":2,\"maximum\":2160},"
+       << "\"urn:x-nmos:cap:format:color_sampling\":{\"enum\":[\"YCbCr-4:2:2\"]},"
+       << "\"urn:x-nmos:cap:format:component_depth\":{\"enum\":[10]},"
+       << "\"urn:x-nmos:cap:format:interlace_mode\":{\"enum\":[\"interlaced_tff\",\"interlaced_bff\"]}}],"
        << "\"version\":\"" << version << "\"},\"device_id\":\"" << deviceId_
        << "\",\"transport\":\"urn:x-nmos:transport:mxl\",\"interface_bindings\":[],\"subscription\":{\"sender_id\":"
        << (channel.active.senderId.empty() ? "null" : "\"" + channel.active.senderId + "\"") << ",\"active\":"
@@ -530,7 +539,7 @@ void NmosNode::registryLoop()
                 receivers += "\"" + channels_[i].receiverId + "\"";
                 auto const& channel = channels_[i];
                 auto label = labelFor(static_cast<int>(i + 1)) + " Video";
-                auto interlace = channel.format.interlaced ? "interlaced_tff" : "progressive";
+                auto const& interlace = channel.format.interlaceMode;
                 resources.push_back("{\"type\":\"source\",\"data\":{\"id\":\"" + channel.sourceId + "\",\"version\":\"" + v + "\",\"label\":\"" + escape(label) +
                                      "\",\"description\":\"Corrected video\",\"format\":\"urn:x-nmos:format:video\",\"caps\":{},\"device_id\":\"" + deviceId_ +
                                      "\",\"parents\":[],\"clock_name\":\"clk0\",\"tags\":{\"urn:x-nmos:tag:grouphint/v1.0\":[\"" +
@@ -686,7 +695,7 @@ void NmosNode::handle(HttpRequest const& req, HttpResponse& res)
     if (path == "/x-nmos/node/v1.3/flows")
     {
         list([&](Channel const& channel) {
-            auto interlace = channel.format.interlaced ? "interlaced_tff" : "progressive";
+            auto const& interlace = channel.format.interlaceMode;
             return std::string("{\"id\":\"") + channel.flowId + "\",\"version\":\"" + v + "\",\"label\":\"Corrected video\",\"description\":\"Corrected video\","
                    "\"format\":\"urn:x-nmos:format:video\",\"media_type\":\"video/v210\",\"source_id\":\"" +
                    channel.sourceId + "\",\"device_id\":\"" + deviceId_ + "\",\"parents\":[],\"grain_rate\":{\"numerator\":" +

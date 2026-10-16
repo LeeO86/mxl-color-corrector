@@ -90,8 +90,14 @@ int main(int argc, char** argv)
         return 1;
     }
     int const stride = cc::v210Stride(width);
+    // The lines in this grain: a field of an interlaced flow has half the frame's. Points are in
+    // grain lines.
+    int const lines = std::min(height, static_cast<int>(info.grainSize / static_cast<std::uint32_t>(stride)));
+    mxlFlowInfo flowInfo{};
+    mxlFlowReaderGetInfo(reader, &flowInfo);
     std::cout << "{\"ok\":true,\"index\":" << index << ",\"valid_slices\":" << info.validSlices << ",\"total_slices\":" << info.totalSlices << ",\"flags\":" << info.flags
-              << ",\"points\":[";
+              << ",\"grain_size\":" << info.grainSize << ",\"lines\":" << lines << ",\"grain_rate\":[" << flowInfo.config.common.grainRate.numerator << ","
+              << flowInfo.config.common.grainRate.denominator << "],\"points\":[";
     bool first = true;
     std::stringstream ss(points);
     std::string item;
@@ -101,7 +107,7 @@ int main(int argc, char** argv)
         if (comma == std::string::npos) continue;
         int x = std::stoi(item.substr(0, comma));
         int y = std::stoi(item.substr(comma + 1));
-        if (x < 0 || y < 0 || x >= width || y >= height) continue;
+        if (x < 0 || y < 0 || x >= width || y >= lines) continue;
         std::vector<std::uint16_t> lineY(static_cast<std::size_t>(width));
         std::vector<std::uint16_t> lineCb(static_cast<std::size_t>(width / 2));
         std::vector<std::uint16_t> lineCr(static_cast<std::size_t>(width / 2));

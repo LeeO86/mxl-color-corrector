@@ -27,7 +27,7 @@ Pinned MXL: `dmf-mxl/mxl` `release/v1.1` at `218ddaa0a08c12ffe75fc475ae65aa3d9ee
 
 * **Slice commits.** On this revision `mxlFlowWriterOpenGrain` clears `validSlices` only when the index is not already the open grain, and `mxlFlowWriterCommitGrain` leaves the grain open while `validSlices < totalSlices`. The worker opens a grain once, writes the newly committed input lines, and commits with an updated `validSlices`. The struct returned by `OpenGrain` is kept so `version`, `size`, `grainSize` and `totalSlices` are not zeroed. Input grain flags, including `MXL_GRAIN_FLAG_INVALID`, are copied onto the output. An invalid grain is copied through, not replaced with black. Flow directories are `<id>.mxl-flow/`, which is the layout this MXL revision writes.
 
-* **Interlaced grain rate.** MXL rejects an interlaced `grain_rate` other than 25/1 or 30000/1001. The corrector reports whole-grain fallback for any non-progressive `interlace_mode` once the flow can be opened.
+* **Interlaced grain rate.** MXL rejects an interlaced `grain_rate` other than 25/1 or 30000/1001, and stores the flow as fields (half the lines, twice the rate). The corrector reports whole-grain fallback for interlaced input and processes each field grain as `height / 2` lines into an output flow with the same `interlace_mode` (1.2.3; before, it read a field as a frame and crashed).
 
 * **Co-siting.** v210 chroma belongs to the even luma sample. Odd luma uses that same pair. Output chroma is the even sample's result. A neutral matrix with legal samples is a byte copy, including line padding.
 
