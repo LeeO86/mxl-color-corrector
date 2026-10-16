@@ -286,7 +286,9 @@ lines (`height / 2` slices). MXL refuses any other interlace mode, `interlaced_p
   probe (§5.3) use the flow's grain rate, the field rate.
 - **Held fields.** The hold and the gap fill keep the last output grain of each parity (the last
   two grains) and write each index with the field of its own parity (`hold::HeldPicture`), so a
-  held frame keeps both fields. With one field only (no grain before it), it fills both parities.
+  held frame keeps both fields. The grain before the last is kept
+  only when it is that index and not flagged invalid (MXL's non-blocking read does not check a ring
+  slot's own index); otherwise, as with no grain before it, the last field fills both parities.
 - Interlaced input runs in whole-grain mode (`fallback_reason` `interlaced`): one field of delay.
 - The preview shows a field at the frame's aspect.
 - **Grain check.** Every source grain and every output grain is checked against the declared

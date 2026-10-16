@@ -156,6 +156,15 @@ private:
     bool fields_ = false;
 };
 
+// Whether the grain read back at `asked` may be kept as the held picture's other field. MXL's
+// non-blocking read returns whatever its ring slot holds, without checking the slot's own index,
+// and returns grains flagged invalid as OK. So after a route change that re-opens the same output
+// flow, the grain before the last can be the previous route's field, or invalid (1.2.3 review).
+[[nodiscard]] inline bool keepOtherField(std::uint64_t asked, std::uint64_t grainIndex, bool invalid)
+{
+    return grainIndex == asked && !invalid;
+}
+
 // A v210 picture in BT.709 narrow-range black (Y 64, Cb and Cr 512), `size` bytes (a grain may be
 // larger than stride × height; the rest stays zero).
 [[nodiscard]] std::vector<std::uint8_t> blackV210(int width, int height, std::size_t size);

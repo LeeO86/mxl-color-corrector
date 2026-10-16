@@ -321,16 +321,17 @@ struct Engine::Impl
             if (writer == nullptr || output == nullptr || lastOut == MXL_UNDEFINED_INDEX) return;
             mxlFlowReader own = nullptr;
             if (mxlCreateFlowReader(output, writerFlow.c_str(), nullptr, &own) != MXL_STATUS_OK || own == nullptr) return;
-            auto keep = [&](std::uint64_t at) {
+            auto keep = [&](std::uint64_t at, bool otherField) {
                 mxlGrainInfo grain{};
                 std::uint8_t* payload = nullptr;
-                if (mxlFlowReaderGetGrainNonBlocking(own, at, &grain, &payload) == MXL_STATUS_OK && payload != nullptr)
-                {
-                    held.set(at, payload, grain.grainSize, grain.flags, geo.interlaced);
-                }
+                if (mxlFlowReaderGetGrainNonBlocking(own, at, &grain, &payload) != MXL_STATUS_OK || payload == nullptr) return;
+                // The other field only when it is the grain asked for and valid; otherwise the
+                // last field fills both parities.
+                if (otherField && !hold::keepOtherField(at, grain.index, (grain.flags & MXL_GRAIN_FLAG_INVALID) != 0)) return;
+                held.set(at, payload, grain.grainSize, grain.flags, geo.interlaced);
             };
-            keep(lastOut);
-            if (geo.interlaced && !held.empty() && lastOut > 0) keep(lastOut - 1);
+            keep(lastOut, false);
+            if (geo.interlaced && !held.empty() && lastOut > 0) keep(lastOut - 1, true);
             mxlReleaseFlowReader(output, own);
         };
         // A writer that pauses up to this long and then catches up in sequence loses nothing;

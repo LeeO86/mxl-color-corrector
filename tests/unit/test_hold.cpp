@@ -232,3 +232,18 @@ TEST_CASE("the held picture of a progressive flow is the last output grain, at e
     CHECK(held.at(44).data == last);
     CHECK(held.at(44).flags == 4u);
 }
+
+TEST_CASE("the held picture keeps the other field only when it is the grain asked for and valid")
+{
+    // MXL's ring slot for index 999 may still hold an older grain (the previous route's field after
+    // the same output flow was re-opened), or an invalid one.
+    CHECK(hold::keepOtherField(999, 999, false));
+    CHECK_FALSE(hold::keepOtherField(999, 997, false));
+    CHECK_FALSE(hold::keepOtherField(999, 999, true));
+    // Without it, the last field fills both parities.
+    std::vector<std::uint8_t> const last(16, 2);
+    hold::HeldPicture held;
+    held.set(1000, last.data(), last.size(), 0, true);
+    CHECK(held.at(1001).data == last);
+    CHECK(held.at(1002).data == last);
+}
