@@ -226,6 +226,7 @@ struct Engine::Impl
         // and reports `unsupported` until it processes a grain again.
         bool unsupported = false;
         double unsupportedLogDue = 0;
+        std::uint64_t unsupportedOut = MXL_UNDEFINED_INDEX; // the last output grain counted as unsupported
         std::uint64_t index = 0;
         bool synced = false;
         int backoffMs = 50;
@@ -255,8 +256,7 @@ struct Engine::Impl
         double watchDue = 0;
         std::uint64_t lastOut = MXL_UNDEFINED_INDEX; // last whole output grain committed
         bool holding = false;
-        std::vector<std::uint8_t> heldFrame;
-        std::uint32_t heldFlags = 0;
+        hold::HeldPicture held;      // the last output grain, or of an interlaced flow the last field of each parity
         std::uint64_t heldGrains = 0;
         std::int64_t outPhase = 0;   // hold::phaseOf at the last committed output grain
         bool holdBlack = false;      // past CC_HOLD_MAX_S: black, flagged invalid
@@ -292,7 +292,7 @@ struct Engine::Impl
             stallHold = false;
             holdBlack = false;
             phaseWait = false;
-            heldFrame.clear();
+            held.clear();
         };
         auto releaseAll = [&] {
             closeReader();
@@ -314,19 +314,23 @@ struct Engine::Impl
             watchFiles = flowFiles(watchDir, flowId);
             watchDue = now + 0.02;
         };
-        // The last whole output grain, read back from this channel's own output flow.
+        // The last whole output grain, read back from this channel's own output flow; of an
+        // interlaced flow also the one before it (the other field), so the held frame keeps both.
         auto captureHeld = [&] {
-            heldFrame.clear();
+            held.clear();
             if (writer == nullptr || output == nullptr || lastOut == MXL_UNDEFINED_INDEX) return;
             mxlFlowReader own = nullptr;
             if (mxlCreateFlowReader(output, writerFlow.c_str(), nullptr, &own) != MXL_STATUS_OK || own == nullptr) return;
-            mxlGrainInfo grain{};
-            std::uint8_t* payload = nullptr;
-            if (mxlFlowReaderGetGrainNonBlocking(own, lastOut, &grain, &payload) == MXL_STATUS_OK && payload != nullptr)
-            {
-                heldFrame.assign(payload, payload + grain.grainSize);
-                heldFlags = grain.flags;
-            }
+            auto keep = [&](std::uint64_t at) {
+                mxlGrainInfo grain{};
+                std::uint8_t* payload = nullptr;
+                if (mxlFlowReaderGetGrainNonBlocking(own, at, &grain, &payload) == MXL_STATUS_OK && payload != nullptr)
+                {
+                    held.set(at, payload, grain.grainSize, grain.flags, geo.interlaced);
+                }
+            };
+            keep(lastOut);
+            if (geo.interlaced && !held.empty() && lastOut > 0) keep(lastOut - 1);
             mxlReleaseFlowReader(output, own);
         };
         // A writer that pauses up to this long and then catches up in sequence loses nothing;
@@ -335,7 +339,7 @@ struct Engine::Impl
         auto stallSeconds = [&] { return std::max(0.25, 10.0 * geo.rateDen / std::max(geo.rateNum, 1)); };
         auto catchUp = [&] { return hold::catchUpGrains(stallSeconds(), geo.rateNum, geo.rateDen); };
         // How many grains one fill may write (hold::fillCap): about the catch-up, at most 256 MB.
-        auto fillCap = [&] { return hold::fillCap(catchUp(), heldFrame.size()); };
+        auto fillCap = [&] { return hold::fillCap(catchUp(), held.grainBytes()); };
         // 3 holding, 4 no_signal (black after CC_HOLD_MAX_S), 0 waiting.
         auto holdState = [&] { return holding ? (holdBlack ? 4 : 3) : 0; };
         // Writes the held grain at [first, last].
@@ -345,9 +349,10 @@ struct Engine::Impl
                 mxlGrainInfo info{};
                 std::uint8_t* payload = nullptr;
                 if (mxlFlowWriterOpenGrain(writer, next, &info, &payload) != MXL_STATUS_OK || payload == nullptr) return;
-                std::memcpy(payload, heldFrame.data(), std::min<std::size_t>(heldFrame.size(), info.grainSize));
+                auto const& grain = held.at(next);
+                std::memcpy(payload, grain.data.data(), std::min<std::size_t>(grain.data.size(), info.grainSize));
                 info.index = next;
-                info.flags = heldFlags;
+                info.flags = grain.flags;
                 info.validSlices = info.totalSlices;
                 if (mxlFlowWriterCommitGrain(writer, &info) != MXL_STATUS_OK) return;
                 lastOut = next;
@@ -356,11 +361,10 @@ struct Engine::Impl
         };
         // Repeats the held grain in the output's own timing, up to now.
         auto emitHeld = [&] {
-            if (!holding || writer == nullptr || heldFrame.empty() || lastOut == MXL_UNDEFINED_INDEX || outOpen) return;
+            if (!holding || writer == nullptr || held.empty() || lastOut == MXL_UNDEFINED_INDEX || outOpen) return;
             if (!holdBlack && hold::expired(monoNow(), lostAt, config.holdMaxS))
             {
-                heldFrame = hold::blackV210(current.width, geo.lines, heldFrame.size());
-                heldFlags = MXL_GRAIN_FLAG_INVALID;
+                held.black(current.width, geo.lines, MXL_GRAIN_FLAG_INVALID);
                 holdBlack = true;
                 logWarn("mxl_hold_expired channel=" + ch + " source=" + routeKey + " after_s=" + std::to_string(config.holdMaxS) +
                         ", output black grains flagged invalid (no_signal)");
@@ -376,8 +380,8 @@ struct Engine::Impl
         double gapLogDue = 0;
         auto fillGap = [&](std::uint64_t next) {
             if (lastOut == MXL_UNDEFINED_INDEX || next <= lastOut + 1 || writer == nullptr) return;
-            if (heldFrame.empty()) captureHeld();
-            if (heldFrame.empty()) return;
+            if (held.empty()) captureHeld();
+            if (held.empty()) return;
             auto const range = hold::fillRange(lastOut, next, fillCap());
             auto const gap = next - lastOut - 1;
             auto const t0 = monoNow();
@@ -385,7 +389,7 @@ struct Engine::Impl
             if (auto const now = monoNow(); now >= gapLogDue)
             {
                 logInfo("output_gap_filled channel=" + ch + " gap=" + std::to_string(gap) + " grains=" + std::to_string(range.last - range.first + 1) +
-                        " ms=" + std::to_string(static_cast<long>((now - t0) * 1000.0)) + " (repeated the last output grain)");
+                        " ms=" + std::to_string(static_cast<long>((now - t0) * 1000.0)) + " (repeated the last output grain, or field of the same parity)");
                 gapLogDue = now + 5.0;
             }
         };
@@ -407,9 +411,9 @@ struct Engine::Impl
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
         };
-        // A grain (or flow) that does not match the declared format: counted, logged at most every
-        // 5 s, skipped.
-        auto markUnsupported = [&](std::string const& route, std::string const& what) {
+        // A grain (or flow) that does not match the declared format: counted (unless `count` is
+        // false: another slice of a grain already counted), logged at most every 5 s, skipped.
+        auto markUnsupported = [&](std::string const& route, std::string const& what, bool count = true) {
             if (outOpen && writer)
             {
                 mxlFlowWriterCancelGrain(writer);
@@ -418,7 +422,7 @@ struct Engine::Impl
             produced = 0;
             grainCpu = 0;
             unsupported = true;
-            runtime.addUnsupported(channel);
+            if (count) runtime.addUnsupported(channel);
             if (auto const now = monoNow(); now >= unsupportedLogDue)
             {
                 logWarn("unsupported_grain channel=" + ch + " source=" + route + " " + what + " expected lines=" + std::to_string(geo.lines) +
@@ -448,7 +452,7 @@ struct Engine::Impl
                 heldGrains = 0;
                 holdBlack = false;
                 captureHeld();
-                holding = !heldFrame.empty();
+                holding = !held.empty();
             }
             resumePending = true;
             logInfo(std::string(reason == "read_error" ? "mxl_reader_error" : "mxl_flow_recreated") + " channel=" + ch + " source=" + route +
@@ -658,7 +662,7 @@ struct Engine::Impl
                     produced = 0;
                     grainCpu = 0;
                     captureHeld();
-                    holding = !heldFrame.empty();
+                    holding = !held.empty();
                     if (holding)
                     {
                         stallHold = true;
@@ -677,9 +681,11 @@ struct Engine::Impl
                 auto const rate = info.config.common.grainRate;
                 if (static_cast<std::int64_t>(rate.numerator) * geo.rateDen != static_cast<std::int64_t>(geo.rateNum) * rate.denominator || rate.denominator == 0)
                 {
-                    // Counted once per source grain period.
+                    // Counted once per source grain period. A hold that was running goes on (and
+                    // turns black after CC_HOLD_MAX_S); its state is shown while it lasts.
                     markUnsupported(key, "flow grain_rate=" + std::to_string(rate.numerator) + "/" + std::to_string(rate.denominator));
-                    runtime.setState(channel, 5, 0, static_cast<int>(logged));
+                    emitHeld();
+                    runtime.setState(channel, holding ? holdState() : 5, 0, static_cast<int>(logged));
                     auto const periodMs = rate.numerator > 0 ? 1000 * static_cast<std::int64_t>(rate.denominator) / rate.numerator : 20;
                     std::this_thread::sleep_for(std::chrono::milliseconds(std::clamp<std::int64_t>(periodMs, 5, 100)));
                     continue;
@@ -811,7 +817,11 @@ struct Engine::Impl
                     produced = 0;
                     if (!grainFits(geo, outInfo.grainSize, outInfo.totalSlices))
                     {
-                        markUnsupported(key, "output grain_size=" + std::to_string(outInfo.grainSize) + " total_slices=" + std::to_string(outInfo.totalSlices));
+                        // Slice mode opens the grain again for each slice: count it once.
+                        bool const first = index != unsupportedOut;
+                        unsupportedOut = index;
+                        markUnsupported(key, "output grain_size=" + std::to_string(outInfo.grainSize) + " total_slices=" + std::to_string(outInfo.totalSlices),
+                            first);
                         return true;
                     }
                 }
@@ -846,7 +856,7 @@ struct Engine::Impl
                 {
                     lastOut = index;
                     unsupported = false;
-                    if (!holding && !heldFrame.empty()) heldFrame.clear();
+                    if (!holding && !held.empty()) held.clear();
                     writeFailures = 0;
                     mxlRational rate{geo.rateNum, geo.rateDen};
                     outPhase = hold::phaseOf(index, mxlGetCurrentIndex(&rate));

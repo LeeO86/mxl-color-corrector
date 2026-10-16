@@ -25,4 +25,14 @@ std::vector<std::uint8_t> blackV210(int width, int height, std::size_t size)
     return frame;
 }
 
+void HeldPicture::black(int width, int lines, std::uint32_t flags)
+{
+    for (auto& slot : slots_)
+    {
+        if (slot.data.empty()) continue;
+        slot.data = blackV210(width, lines, slot.data.size());
+        slot.flags = flags;
+    }
+}
+
 } // namespace cc::hold

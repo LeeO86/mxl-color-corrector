@@ -12,10 +12,13 @@ bottom field has its bars the other way round):
 - the output's even grains are the first field (top for tff, bottom for bff), both corrected
   (a gain moves both fields' white);
 - the output runs at 50 grains/s with no invalid grain;
-- the source killed (its flow left behind) is held at the field rate, and resumes.
+- the source killed (its flow left behind) is held at the field rate with both fields (each
+  held grain is the field of its own parity), and resumes.
 Then a flow whose flow_def.json does not match its grains (an interlaced flow re-labelled
 progressive 1080p50: 540-line grains read as 1080 lines; and progressive at 25/1: the grain rate
-differs) leaves the channel `unsupported`, counted, never crashed; routed back, it runs again.
+differs) leaves the channel `unsupported`, counted, never crashed. A held source replaced by a
+flow whose grain rate does not match keeps the hold going and turns black and invalid after
+CC_HOLD_MAX_S (3 s here). Routed back, the channel runs again.
 """
 
 import json
@@ -76,7 +79,7 @@ def point(doc, x, y):
     raise SystemExit(f"missing point {x},{y} in {doc}")
 
 
-def writer(domain, domain_id, flow, mode, seconds=90):
+def writer(domain, domain_id, flow, mode, seconds=150, rate="25", extra=()):
     return subprocess.Popen(
         [
             os.path.join(BUILD, "mxl-cc-pattern"),
@@ -85,12 +88,13 @@ def writer(domain, domain_id, flow, mode, seconds=90):
             "--flow-id", flow,
             "--width", "1920",
             "--height", "1080",
-            "--rate", "25",
+            "--rate", rate,
             "--interlace", mode,
             "--slices", "540",
             "--sleep-us", "0",
             "--paced", "1",
             "--seconds", str(seconds),
+            *extra,
         ]
     )
 
@@ -138,6 +142,21 @@ def output_def(out_domain, out_flow):
         return json.load(f)
 
 
+def check_parity(doc, mode):
+    """Even grains must be the first field: top (bars, white at x=120) for tff, bottom (bars the
+    other way, black at x=120, white at x=1800) for bff. Returns the white level."""
+    left, right = point(doc, 120, 100), point(doc, 1800, 100)
+    # White may be graded (a gain): compare with the black bar.
+    top = left["y_code"] > right["y_code"] + 300 and right["y_code"] < 100
+    bottom = right["y_code"] > left["y_code"] + 300 and left["y_code"] < 100
+    if not (top or bottom):
+        raise SystemExit(f"output field is neither top nor bottom: {doc}")
+    first = doc["index"] % 2 == 0
+    if top != (first == (mode == "interlaced_tff")):
+        raise SystemExit(f"{mode}: grain {doc['index']} holds the {'top' if top else 'bottom'} field")
+    return max(left["y_code"], right["y_code"])
+
+
 def check_fields(corrector, out_domain, mode, source_flow):
     def ready():
         st = channel()
@@ -156,23 +175,13 @@ def check_fields(corrector, out_domain, mode, source_flow):
     mine = [f for f in flows if f["id"] == out_flow]
     if not mine or mine[0]["interlace_mode"] != mode or mine[0]["grain_rate"] != {"numerator": 25, "denominator": 1}:
         raise SystemExit(f"NMOS flow does not advertise {mode} at 25/1: {mine or flows}")
-    # Even grains are the first field: top (bars, white at x=120) for tff, bottom (bars the other
-    # way, black at x=120, white at x=1800) for bff.
     seen = {}
     deadline = time.time() + 10
     while len(seen) < 2 and time.time() < deadline:
         doc = sample(out_domain, out_flow)
         if doc["total_slices"] != 540 or doc["grain_size"] != FIELD_BYTES or doc["lines"] != 540 or doc["grain_rate"] != [50, 1]:
             raise SystemExit(f"output grain is not a 1080i50 field: {doc}")
-        left, right = point(doc, 120, 100), point(doc, 1800, 100)
-        top = left["y_code"] > 800 and right["y_code"] < 100
-        bottom = left["y_code"] < 100 and right["y_code"] > 800
-        if not (top or bottom):
-            raise SystemExit(f"output field is neither top nor bottom: {doc}")
-        first = doc["index"] % 2 == 0
-        if top != (first == (mode == "interlaced_tff")):
-            raise SystemExit(f"{mode}: grain {doc['index']} holds the {'top' if top else 'bottom'} field")
-        seen[doc["index"] % 2] = max(left["y_code"], right["y_code"])
+        seen[doc["index"] % 2] = check_parity(doc, mode)
         time.sleep(0.013)
     if len(seen) < 2:
         raise SystemExit(f"did not see both fields: {seen}")
@@ -208,6 +217,7 @@ def main():
             "NMOS_SEED": "it-cc-interlaced",
             "CC_PREVIEW_FPS": "2",
             "NMOS_DNS_SD": "false",
+            "CC_HOLD_MAX_S": "3",
         }
     )
     corrector = subprocess.Popen([os.path.join(BUILD, "mxl-color-corrector")], env=env)
@@ -253,6 +263,15 @@ def main():
                 h1 = sample(out_domain, out_flow)["index"]
                 if not 40 <= h1 - h0 <= 60:
                     raise SystemExit(f"held output ran {h1 - h0} grains in 1 s, expected about 50")
+                # Held grains keep both fields: each index has the field of its own parity.
+                held_parities = set()
+                for _ in range(12):
+                    doc = sample(out_domain, out_flow)
+                    check_parity(doc, mode)
+                    held_parities.add(doc["index"] % 2)
+                    time.sleep(0.013)
+                if held_parities != {0, 1} or channel()["state"] != "holding":
+                    raise SystemExit(f"held fields: parities {held_parities}, state {channel()['state']}")
                 w = writer(domain, domain_id, flow, mode)
                 writers.append(w)
                 wait_for("resume", lambda: channel()["state"] == "whole_grain", seconds=5)
@@ -260,7 +279,7 @@ def main():
                 invalid = sample(out_domain, out_flow, extra=("--count-invalid", "150"))
                 if invalid["invalid"]:
                     raise SystemExit(f"invalid output grains around the hold: {invalid}")
-                print(f"hold ok: {h1 - h0} held grains in 1 s, resumed, no invalid grain")
+                print(f"hold ok: {h1 - h0} held grains in 1 s, both fields in their own parity, resumed, no invalid grain")
                 alive(corrector)
 
         # Flows whose flow_def.json does not match their grains.
@@ -287,6 +306,44 @@ def main():
             if after <= before or channel()["state"] != "unsupported":
                 raise SystemExit(f"mismatch {lie_mode}@{lie_rate}: unsupported_grains {before} -> {after}, state {channel()['state']}")
             print(f"mismatch {lie_mode} at {lie_rate}/1 ok: unsupported, {after - before:.0f} counted, no crash")
+
+        # A held source replaced by a flow whose grain rate does not match (a progressive 25/1 flow
+        # whose flow_def.json says interlaced_tff, so the channel keeps its output): the hold goes
+        # on and turns black and invalid after CC_HOLD_MAX_S.
+        domain = os.path.join(BASE, "src-hold")
+        domain_id = "77777770-7777-4777-8777-777777777777"
+        flow = "88888880-8888-4888-8888-888888888888"
+        w = writer(domain, domain_id, flow, "interlaced_tff")
+        writers.append(w)
+        route(receiver, domain_id, flow)
+        out_flow, _ = check_fields(corrector, out_domain, "interlaced_tff", flow)
+        stop(w, signal.SIGKILL)
+        wait_for("holding", lambda: channel()["state"] == "holding", seconds=3)
+        held_at = time.time()
+        shutil.rmtree(domain)
+        # domain_def.json comes 1.5 s after the flow, so the channel finds the domain only after
+        # its flow_def.json is re-written.
+        w = writer(domain, domain_id, flow, "progressive", extra=("--late-domain-def", "1500"))
+        writers.append(w)
+        path = os.path.join(domain, flow + ".mxl-flow", "flow_def.json")
+        wait_for("replacement flow", lambda: os.path.exists(path) and os.path.getsize(path) > 0, seconds=3, step=0.01)
+        with open(path, encoding="utf-8") as f:
+            definition = json.load(f)
+        definition["interlace_mode"] = "interlaced_tff"
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(definition, f)
+        before = metric("unsupported_grains_total") or 0
+        wait_for("unsupported grains", lambda: (metric("unsupported_grains_total") or 0) > before, seconds=5)
+        h0 = sample(out_domain, out_flow)["index"]
+        wait_for("no_signal", lambda: channel()["state"] == "no_signal", seconds=6)
+        black_after = time.time() - held_at
+        time.sleep(0.5)
+        h1 = sample(out_domain, out_flow)["index"]
+        invalid = sample(out_domain, out_flow, extra=("--count-invalid", "8"))
+        if h1 <= h0 or invalid["invalid"] != invalid["checked"] or channel()["output_flow"] != out_flow:
+            raise SystemExit(f"hold during the rate mismatch: head {h0} -> {h1}, {invalid}, output {channel()['output_flow']} (was {out_flow})")
+        alive(corrector)
+        print(f"hold during unsupported ok: no_signal {black_after:.1f} s after the hold started, output went on ({h1 - h0} grains), black grains invalid")
 
         # Back to a good interlaced source: running again.
         domain, domain_id, flow = tff_flow

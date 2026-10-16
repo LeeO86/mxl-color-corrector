@@ -185,3 +185,50 @@ TEST_CASE("a fill writes at most twice the catch-up and 256 MB")
     CHECK(range.last - range.first + 1 == capUhd);
     CHECK(hold::fillCap(up50, std::size_t{1} << 31) == 1);
 }
+
+TEST_CASE("the held picture of an interlaced flow keeps both fields and writes each index with its own parity")
+{
+    std::vector<std::uint8_t> const top(64, 1);
+    std::vector<std::uint8_t> const bottom(64, 2);
+    hold::HeldPicture held;
+    CHECK(held.empty());
+    // tff: even indices are the top field. The last output grain was 1001 (bottom), before it 1000 (top).
+    held.set(1001, bottom.data(), bottom.size(), 0, true);
+    held.set(1000, top.data(), top.size(), 0, true);
+    CHECK(held.grainBytes() == 64);
+    for (std::uint64_t index = 1002; index < 1010; ++index)
+    {
+        CHECK(held.at(index).data == (index % 2 == 0 ? top : bottom));
+    }
+    // Only one field kept (the grain before the last was not there): it fills both parities.
+    hold::HeldPicture one;
+    one.set(1001, bottom.data(), bottom.size(), 0, true);
+    CHECK(one.at(1002).data == bottom);
+    CHECK(one.at(1003).data == bottom);
+    // Past CC_HOLD_MAX_S both fields turn black and invalid.
+    int const stride = v210Stride(6);
+    std::vector<std::uint8_t> const field(static_cast<std::size_t>(stride) * 2, 7);
+    hold::HeldPicture expiring;
+    expiring.set(10, field.data(), field.size(), 0, true);
+    expiring.set(11, field.data(), field.size(), 0, true);
+    expiring.black(6, 2, 1u);
+    auto const black = hold::blackV210(6, 2, field.size());
+    CHECK(expiring.at(12).data == black);
+    CHECK(expiring.at(13).data == black);
+    CHECK(expiring.at(12).flags == 1u);
+    CHECK(expiring.at(13).flags == 1u);
+    held.clear();
+    CHECK(held.empty());
+}
+
+TEST_CASE("the held picture of a progressive flow is the last output grain, at every index")
+{
+    std::vector<std::uint8_t> const older(16, 1);
+    std::vector<std::uint8_t> const last(16, 2);
+    hold::HeldPicture held;
+    held.set(41, older.data(), older.size(), 0, false);
+    held.set(42, last.data(), last.size(), 4u, false);
+    CHECK(held.at(43).data == last);
+    CHECK(held.at(44).data == last);
+    CHECK(held.at(44).flags == 4u);
+}

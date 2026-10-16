@@ -223,7 +223,8 @@ reader still holds the old file; its head stands, and a read past it returns
   starts it fills in the time since the last output grain (within the fill cap, below).
 - **No holes.** MXL marks every grain a writer skips `MXL_GRAIN_FLAG_INVALID`, and readers take
   that as no signal. So whenever the next output grain is more than one past the last, the gap is
-  filled with the last output grain (`output_gap_filled`, at most every 5 s; 1.2.2). One fill
+  filled with the last output grain (`output_gap_filled`, at most every 5 s; 1.2.2; of an
+  interlaced flow the last field of the same parity, §5.4). One fill
   writes at most twice the catch-up (42 grains at 50p) and at most 256 MB (12 grains at 2160p),
   the newest grains, so it never blocks the channel long. The older grains of a longer gap stay
   invalid; readers that follow the head never reach them. This covers the channel falling behind
@@ -283,6 +284,9 @@ lines (`height / 2` slices). MXL refuses any other interlace mode, `interlaced_p
   first field: top for tff, bottom for bff).
 - **Timing in fields.** The hold, the gap fill, the stall threshold, the catch-up and the head
   probe (§5.3) use the flow's grain rate, the field rate.
+- **Held fields.** The hold and the gap fill keep the last output grain of each parity (the last
+  two grains) and write each index with the field of its own parity (`hold::HeldPicture`), so a
+  held frame keeps both fields. With one field only (no grain before it), it fills both parities.
 - Interlaced input runs in whole-grain mode (`fallback_reason` `interlaced`): one field of delay.
 - The preview shows a field at the frame's aspect.
 - **Grain check.** Every source grain and every output grain is checked against the declared
@@ -291,7 +295,9 @@ lines (`height / 2` slices). MXL refuses any other interlace mode, `interlaced_p
   interlaced). A mismatch is never read or written past the grain's end: the grain is skipped,
   the state is `unsupported`, `unsupported_grains_total` counts it (once per grain period for a
   rate mismatch), and `unsupported_grain` is logged with the sizes at most every 5 s. The next
-  grain that fits, or a new route, runs again. 1.2.2 read a 1080i field as 1080 lines and
+  grain that fits, or a new route, runs again. A hold that is running goes on during a rate
+  mismatch (and turns black after `CC_HOLD_MAX_S`); the state shows `holding` or `no_signal`
+  while it lasts. An output grain that does not fit is counted once, also in slice mode. 1.2.2 read a 1080i field as 1080 lines and
   crashed (SIGSEGV).
 - **NMOS.** The output flow and sender carry the input's `interlace_mode`. The receiver's caps
   have two constraint sets: progressive at 24000/1001 … 60/1, and `interlaced_tff` or
@@ -439,7 +445,8 @@ flow's format, §5.4; 1.2.3); process CPU. Grafana dashboard in `deploy/grafana/
     right after the held grains and never at or below them (also over 20 000 random cases);
     `CC_HOLD_MAX_S` and the black picture;
   - interlaced input (`test_interlace.cpp`, and `test_interlaced.cpp` on a real MXL domain): the
-    field geometry and rate, the grain check, the mirrored output flow_def (MXL makes it 540-line
+    field geometry and rate, the grain check, the held picture by parity (`test_hold.cpp`), the
+    mirrored output flow_def (MXL makes it 540-line
     fields at 50/1 for 1080i50), the preview aspect, the NMOS caps and flow (1.2.3).
 - Integration (CI): a test writer (mxl-test-player or a small tool) produces a
   1080p50 flow with slice commits; the corrector channel is activated via IS-05;
@@ -458,7 +465,8 @@ flow's format, §5.4; 1.2.3); process CPU. Grafana dashboard in `deploy/grafana/
   `tests/integration/interlaced.py` (1.2.3): 1080i50 tff and bff; the output declares the
   input's mode at 25/1 and carries 540-line grains at 50/1, even grains are the first field, a
   gain moves both fields, the output runs at 50 grains/s with no invalid grain and holds at that
-  rate; flows whose `flow_def.json` does not match their grains leave the channel
+  rate with each held grain the field of its own parity; a held source replaced by a flow with a
+  mismatched grain rate keeps the hold and turns `no_signal` after the limit; flows whose `flow_def.json` does not match their grains leave the channel
   `unsupported`, counted, running.
 - NMOS conformance: AMWA IS-04-01, IS-05-01, IS-05-02, BCP-007-03-01.
 - Performance (documented): channels per Precision 3930 core at 1080p50 and
