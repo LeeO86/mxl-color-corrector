@@ -2,6 +2,8 @@
 
 Live colour correction for MXL `video/v210` flows. Each channel reads one video flow and writes one corrected flow. White and black balance, master gain and pedestal, brightness and saturation are one affine 3×4 matrix in Y′CbCr, applied slice by slice. The web UI has colour wheels or RGB pots per correction section, and operator screens can frame the `controls` and `bypass` widgets.
 
+Part of [mxl-stack](https://github.com/LeeO86/mxl-stack), a collection of open-source MXL media functions with Docker Compose and Kubernetes examples.
+
 Version 1.0.0 is the stable settings and API contract. A breaking change needs 2.0.0.
 
 ## Build
