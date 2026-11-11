@@ -4,7 +4,7 @@ Status: Draft v0.1 (for implementation by Claude Code or Cursor in a new, empty 
 Repository: `LeeO86/mxl-color-corrector` (name can still change)
 Aligns with: `LeeO86/mxl-decklink`, `LeeO86/mxl-st2110-gateway`, `LeeO86/mxl-fabrics-agent`,
 `LeeO86/mxl-multiviewer`, `LeeO86/mxl-webrtc-monitor`, `LeeO86/mxl-test-player`,
-platform repo `mmz-srf/mxl-poc-platform`
+the (private) platform repository
 
 The key words MUST, MUST NOT, SHOULD, SHOULD NOT and MAY are used as in RFC 2119.
 
